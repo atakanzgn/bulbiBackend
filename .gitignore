@@ -1,0 +1,15 @@
+# Derlenmis binary'ler
+/bulbi-backend
+/bulbi-backend.exe
+*.exe
+
+# Veritabani (calisma aninda olusur)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Firebase servis hesabi anahtarlari (ASLA commit etme)
+*service-account*.json
+*serviceAccount*.json
+fcm*.json
+credentials*.json
