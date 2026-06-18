@@ -189,7 +189,7 @@ func parseKey(pemStr string) (*rsa.PrivateKey, error) {
 // Broadcaster her gun belirlenen saatte kayitli tum cihazlara bildirim yollar.
 type Broadcaster struct {
 	Sender *Sender
-	Tokens func() ([]string, error)
+	Tokens func(context.Context) ([]string, error)
 	Hour   int
 	Title  string
 	Body   string
@@ -214,7 +214,7 @@ func (b *Broadcaster) broadcast(ctx context.Context) {
 	if b.Sender == nil {
 		return
 	}
-	tokens, err := b.Tokens()
+	tokens, err := b.Tokens(ctx)
 	if err != nil {
 		log.Printf("push: token listesi alinamadi: %v", err)
 		return

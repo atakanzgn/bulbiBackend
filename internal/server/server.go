@@ -69,12 +69,12 @@ func (s *Server) postScore(w http.ResponseWriter, r *http.Request) {
 	if len(name) > 24 {
 		name = name[:24]
 	}
-	if err := s.Store.SubmitScore(req.DeviceID, name, req.Puzzle, req.Day, req.Score); err != nil {
+	if err := s.Store.SubmitScore(r.Context(), req.DeviceID, name, req.Puzzle, req.Day, req.Score); err != nil {
 		log.Printf("skor kaydi hatasi: %v", err)
 		writeError(w, http.StatusInternalServerError, "skor kaydedilemedi")
 		return
 	}
-	rank, score, _, err := s.Store.MyRank(req.Puzzle, req.Day, req.DeviceID)
+	rank, score, _, err := s.Store.MyRank(r.Context(), req.Puzzle, req.Day, req.DeviceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "siralama alinamadi")
 		return
@@ -99,14 +99,14 @@ func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	top, err := s.Store.Leaderboard(puzzle, day, limit)
+	top, err := s.Store.Leaderboard(r.Context(), puzzle, day, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "liderlik alinamadi")
 		return
 	}
 	resp := map[string]any{"top": top}
 	if deviceID := q.Get("deviceId"); deviceID != "" {
-		rank, score, found, err := s.Store.MyRank(puzzle, day, deviceID)
+		rank, score, found, err := s.Store.MyRank(r.Context(), puzzle, day, deviceID)
 		if err == nil && found {
 			resp["me"] = map[string]int{"rank": rank, "score": score}
 		}
@@ -129,7 +129,7 @@ func (s *Server) postDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "deviceId ve token gerekli")
 		return
 	}
-	if err := s.Store.SaveDevice(req.DeviceID, req.Token, req.Platform); err != nil {
+	if err := s.Store.SaveDevice(r.Context(), req.DeviceID, req.Token, req.Platform); err != nil {
 		writeError(w, http.StatusInternalServerError, "cihaz kaydedilemedi")
 		return
 	}

@@ -1,16 +1,17 @@
-// Package store SQLite tabanli kalici depolama saglar: gunluk skorlar
-// (liderlik tablosu) ve push icin cihaz token'lari. modernc.org/sqlite ile
-// cgo gerektirmez (Windows/Linux'ta tek binary).
+// Package store PostgreSQL tabanli kalici depolama saglar: gunluk skorlar
+// (liderlik tablosu) ve push icin cihaz token'lari. pgx/v5 (pgxpool) kullanir.
 package store
 
 import (
-	"database/sql"
+	"context"
+	"errors"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct{ pool *pgxpool.Pool }
 
 // Entry liderlik tablosu satiri.
 type Entry struct {
@@ -19,61 +20,68 @@ type Entry struct {
 	Rank  int    `json:"rank"`
 }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS scores (
-  device_id  TEXT    NOT NULL,
-  name       TEXT    NOT NULL DEFAULT 'Anonim',
-  puzzle     TEXT    NOT NULL,
-  day        INTEGER NOT NULL,
-  score      INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (device_id, puzzle, day)
-);
-CREATE INDEX IF NOT EXISTS idx_scores_board ON scores(puzzle, day, score DESC);
-CREATE TABLE IF NOT EXISTS devices (
-  device_id  TEXT PRIMARY KEY,
-  token      TEXT NOT NULL,
-  platform   TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-`
+var migrations = []string{
+	`CREATE TABLE IF NOT EXISTS scores (
+		device_id  TEXT    NOT NULL,
+		name       TEXT    NOT NULL DEFAULT 'Anonim',
+		puzzle     TEXT    NOT NULL,
+		day        INTEGER NOT NULL,
+		score      INTEGER NOT NULL,
+		updated_at BIGINT  NOT NULL,
+		PRIMARY KEY (device_id, puzzle, day)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_scores_board ON scores (puzzle, day, score DESC)`,
+	`CREATE TABLE IF NOT EXISTS devices (
+		device_id  TEXT   PRIMARY KEY,
+		token      TEXT   NOT NULL,
+		platform   TEXT   NOT NULL,
+		updated_at BIGINT NOT NULL
+	)`,
+}
 
-// Open veritabanini acar ve semayi olusturur.
-func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+// Open havuzu acar, baglantiyi dogrular ve semayi olusturur.
+// dsn ornegi: postgres://bulbi:sifre@db:5432/bulbi?sslmode=disable
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	for _, m := range migrations {
+		if _, err := pool.Exec(ctx, m); err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
+	return &Store{pool: pool}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() { s.pool.Close() }
 
 // SubmitScore cihaz/bulmaca/gun icin skoru kaydeder; mevcut skordan iyiyse
 // gunceller (gunde tek, en iyi skor).
-func (s *Store) SubmitScore(deviceID, name, puzzle string, day, score int) error {
-	_, err := s.db.Exec(`
+func (s *Store) SubmitScore(ctx context.Context, deviceID, name, puzzle string, day, score int) error {
+	_, err := s.pool.Exec(ctx, `
 INSERT INTO scores (device_id, name, puzzle, day, score, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT(device_id, puzzle, day) DO UPDATE SET
-  score      = MAX(score, excluded.score),
-  name       = excluded.name,
-  updated_at = excluded.updated_at`,
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (device_id, puzzle, day) DO UPDATE SET
+  score      = GREATEST(scores.score, EXCLUDED.score),
+  name       = EXCLUDED.name,
+  updated_at = EXCLUDED.updated_at`,
 		deviceID, name, puzzle, day, score, time.Now().Unix())
 	return err
 }
 
 // Leaderboard belirli gun/bulmaca icin en yuksek [limit] skoru dondurur.
-func (s *Store) Leaderboard(puzzle string, day, limit int) ([]Entry, error) {
-	rows, err := s.db.Query(`
+func (s *Store) Leaderboard(ctx context.Context, puzzle string, day, limit int) ([]Entry, error) {
+	rows, err := s.pool.Query(ctx, `
 SELECT name, score FROM scores
-WHERE puzzle = ? AND day = ?
+WHERE puzzle = $1 AND day = $2
 ORDER BY score DESC, updated_at ASC
-LIMIT ?`, puzzle, day, limit)
+LIMIT $3`, puzzle, day, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -94,18 +102,18 @@ LIMIT ?`, puzzle, day, limit)
 }
 
 // MyRank bir cihazin belirli gun/bulmacadaki sirasini ve skorunu dondurur.
-func (s *Store) MyRank(puzzle string, day int, deviceID string) (rank, score int, found bool, err error) {
-	err = s.db.QueryRow(
-		`SELECT score FROM scores WHERE device_id=? AND puzzle=? AND day=?`,
+func (s *Store) MyRank(ctx context.Context, puzzle string, day int, deviceID string) (rank, score int, found bool, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT score FROM scores WHERE device_id=$1 AND puzzle=$2 AND day=$3`,
 		deviceID, puzzle, day).Scan(&score)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, 0, false, nil
 	}
 	if err != nil {
 		return 0, 0, false, err
 	}
-	err = s.db.QueryRow(
-		`SELECT COUNT(*)+1 FROM scores WHERE puzzle=? AND day=? AND score > ?`,
+	err = s.pool.QueryRow(ctx,
+		`SELECT COUNT(*)+1 FROM scores WHERE puzzle=$1 AND day=$2 AND score > $3`,
 		puzzle, day, score).Scan(&rank)
 	if err != nil {
 		return 0, 0, false, err
@@ -114,21 +122,21 @@ func (s *Store) MyRank(puzzle string, day int, deviceID string) (rank, score int
 }
 
 // SaveDevice push icin cihaz token'ini kaydeder/gunceller.
-func (s *Store) SaveDevice(deviceID, token, platform string) error {
-	_, err := s.db.Exec(`
+func (s *Store) SaveDevice(ctx context.Context, deviceID, token, platform string) error {
+	_, err := s.pool.Exec(ctx, `
 INSERT INTO devices (device_id, token, platform, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(device_id) DO UPDATE SET
-  token      = excluded.token,
-  platform   = excluded.platform,
-  updated_at = excluded.updated_at`,
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (device_id) DO UPDATE SET
+  token      = EXCLUDED.token,
+  platform   = EXCLUDED.platform,
+  updated_at = EXCLUDED.updated_at`,
 		deviceID, token, platform, time.Now().Unix())
 	return err
 }
 
 // AllTokens kayitli tum push token'larini dondurur.
-func (s *Store) AllTokens() ([]string, error) {
-	rows, err := s.db.Query(`SELECT token FROM devices`)
+func (s *Store) AllTokens(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT token FROM devices`)
 	if err != nil {
 		return nil, err
 	}

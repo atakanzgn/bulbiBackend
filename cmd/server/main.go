@@ -1,4 +1,4 @@
-// Bulbi backend: icerik servisi + liderlik tablosu + push bildirim.
+// Bulbi backend: icerik servisi + liderlik tablosu (PostgreSQL) + push bildirim.
 package main
 
 import (
@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -20,9 +19,12 @@ import (
 
 func main() {
 	addr := env("ADDR", ":8080")
-	dataDir := env("DATA_DIR", "data")
-	contentPath := env("CONTENT_PATH", filepath.Join(dataDir, "content.json"))
-	dbPath := env("DB_PATH", filepath.Join(dataDir, "bulbi.db"))
+	contentPath := env("CONTENT_PATH", "data/content.json")
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL gerekli (orn: postgres://bulbi:sifre@db:5432/bulbi?sslmode=disable)")
+	}
 
 	c, err := content.NewStore(contentPath)
 	if err != nil {
@@ -31,11 +33,14 @@ func main() {
 	log.Printf("icerik yuklendi: v%d, %d kelime, %d soru",
 		c.Version(), len(c.Get().Words), len(c.Get().Questions))
 
-	st, err := store.Open(dbPath)
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), 15*time.Second)
+	st, err := store.Open(openCtx, dsn)
+	cancelOpen()
 	if err != nil {
-		log.Fatalf("db acilamadi (%s): %v", dbPath, err)
+		log.Fatalf("veritabani acilamadi: %v", err)
 	}
 	defer st.Close()
+	log.Println("veritabani baglandi (postgres)")
 
 	// Push (opsiyonel): FCM_CREDENTIALS verilirse etkin.
 	var sender *push.Sender

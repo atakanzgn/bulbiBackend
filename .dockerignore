@@ -1,0 +1,19 @@
+.git
+.github
+*.exe
+/bulbi-backend
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Gizli anahtarlar (asla imaja girmesin)
+*service-account*.json
+*serviceAccount*.json
+fcm*.json
+credentials*.json
+
+# Imaja gereksiz
+docker-compose.yml
+Caddyfile
+README.md
+FIREBASE_SETUP.md
