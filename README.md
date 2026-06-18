@@ -52,22 +52,26 @@ Varsayılan adres: `:8080`. İçerik: `data/content.json`.
 1. Firebase projesi + FCM. Servis hesabı anahtarını (JSON) sunucuya koy (`/root/bulbi/fcm.json`).
 2. `FCM_CREDENTIALS` ve `FCM_PROJECT_ID` ver. Flutter token'ı `/api/v1/devices`'a yollar.
 
-## CI/CD — her push'ta GHCR imajı
+## CI/CD — her push'ta Docker Hub imajı
 
-`.github/workflows/docker.yml` her `main` push'unda imajı derleyip **GHCR**'a `ghcr.io/atakanzgn/bulbibackend` olarak yollar (`latest` + kısa SHA). Ekstra secret gerekmez (`GITHUB_TOKEN`).
+`.github/workflows/docker.yml` her `main` push'unda imajı derleyip **Docker Hub**'a `docker.io/<kullanıcı>/bulbibackend` olarak yollar (`latest` + kısa SHA).
 
-> Paket ilk başta **private** gelir. Sunucudan çekmek için ya paketi public yap (GitHub → Packages → Package settings → Change visibility) ya da sunucuda `docker login ghcr.io` yap.
+GitHub repo → Settings → Secrets and variables → Actions'a iki secret ekle:
+- `DOCKERHUB_USERNAME` — Docker Hub kullanıcı adın
+- `DOCKERHUB_TOKEN` — Docker Hub → Account settings → Personal access tokens → **Read & Write** token
+
+> Neden Docker Hub: ghcr.io bazı bölgelerden (TR) çok yavaş indiriyor; docker.io hızlı ve sorunsuz çekiliyor.
 
 ## Sunucuda deploy (docker compose + Nginx Proxy Manager)
 
-Compose dosyası repoda **tutulmaz**; sunucuda (`/root/bulbi/docker-compose.yml`) sen oluşturursun. Container'lar NPM'in `proxy_net` ağına bağlanır; HTTPS/alan adını **Nginx Proxy Manager** yönetir (NPM'de Proxy Host → forward: `bulbi-backend` port `8080`).
+Compose dosyası repoda **tutulmaz**; sunucuda (`/root/bulbi/docker-compose.yml`) sen oluşturursun. Container'lar NPM'in `proxy_net` ağına bağlanır; HTTPS/alan adını **Nginx Proxy Manager** yönetir (NPM'de Proxy Host: `bulbi.atakanzgn.com.tr` → `bulbi-backend:8080`, SSL'i NPM verir).
 
 Örnek (sunucuda oluştur):
 
 ```yaml
 services:
   backend:
-    image: ghcr.io/atakanzgn/bulbibackend:latest
+    image: docker.io/<kullanıcı>/bulbibackend:latest
     container_name: bulbi-backend
     restart: unless-stopped
     environment:
