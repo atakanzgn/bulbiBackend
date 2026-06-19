@@ -33,6 +33,8 @@ Varsayılan adres: `:8080`. İçerik: `data/content.json`.
 | `REDIS_URL` | (boş) | `redis://:şifre@redis:6379/0` — boşsa in-memory yedek (tek instance için yeterli) |
 | `RATE_LIMIT_PER_MIN` | `120` | IP başına dakikalık istek limiti (`/api/*`) |
 | `MIN_APP_BUILD` | `1` | Splash'te gerekli minimum uygulama build numarası |
+| `UPLOAD_DIR` | `data/uploads` | Bildirim görselleri klasörü (kalıcılık için volume bağla) |
+| `PUBLIC_BASE_URL` | (boş) | Görsel URL tabanı (boşsa istek Host'undan); örn. `https://bulbi.atakanzgn.com.tr` |
 
 ## API uçları
 
@@ -99,9 +101,11 @@ services:
       FCM_PROJECT_ID: "<firebase-proje-id>"
       PUSH_HOUR: "10"
       MIN_APP_BUILD: "1"
+      PUBLIC_BASE_URL: "https://bulbi.atakanzgn.com.tr"
       TZ: "Europe/Istanbul"
     volumes:
       - /root/bulbi/fcm.json:/run/secrets/fcm.json:ro
+      - bulbi-uploads:/app/data/uploads
     networks: [proxy_net, internal]
     depends_on: [db, redis]
   db:
@@ -128,6 +132,7 @@ networks:
 
 volumes:
   bulbi-pgdata:
+  bulbi-uploads:
 ```
 
 Güncelleme:

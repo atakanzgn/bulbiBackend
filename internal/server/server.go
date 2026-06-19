@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,11 +36,13 @@ type Server struct {
 	AdminPassword   string // bos ise admin paneli kapali
 	RateLimitPerMin int    // 0 -> 120
 	MinAppBuild     int    // istemcinin gerektirdigi minimum build numarasi
+	UploadDir       string // yuklenen bildirim gorselleri
+	PublicBaseURL   string // gorsel URL'i icin (bos ise istek Host'undan)
 
 	mem *memStore
 }
 
-const adminPageSize = 50
+const adminPageSize = 20
 
 const cacheKeyBundle = "content:bundle"
 
@@ -66,6 +72,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/import/words", s.adminGuard(s.adminImportWords))
 	mux.HandleFunc("POST /admin/import/questions", s.adminGuard(s.adminImportQuestions))
 	mux.HandleFunc("POST /admin/notify", s.adminGuard(s.adminNotify))
+
+	// Yuklenen bildirim gorselleri (FCM image URL'i icin herkese acik).
+	mux.Handle("GET /uploads/",
+		http.StripPrefix("/uploads/", http.FileServer(http.Dir(s.UploadDir))))
 
 	return cors(s.rateLimit(logging(mux)))
 }
@@ -583,12 +593,25 @@ func (s *Server) adminNotify(w http.ResponseWriter, r *http.Request) {
 		redirectMsg(w, r, "Push kapali (FCM yapilandirilmamis)")
 		return
 	}
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		redirectMsg(w, r, "Form okunamadi")
+		return
+	}
 	title := strings.TrimSpace(r.FormValue("title"))
 	body := strings.TrimSpace(r.FormValue("body"))
-	image := strings.TrimSpace(r.FormValue("image"))
 	if title == "" || body == "" {
 		redirectMsg(w, r, "Baslik ve icerik gerekli")
 		return
+	}
+	image := ""
+	if file, hdr, err := r.FormFile("image"); err == nil {
+		defer file.Close()
+		path, serr := s.saveUpload(file, hdr)
+		if serr != nil {
+			redirectMsg(w, r, "Gorsel: "+serr.Error())
+			return
+		}
+		image = s.publicURL(r, path)
 	}
 	go func() {
 		tokens, err := s.Store.AllTokens(context.Background())
@@ -597,9 +620,42 @@ func (s *Server) adminNotify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sent := s.Push.SendToAll(context.Background(), tokens, title, body, image)
-		log.Printf("admin bildirim: %d/%d gonderildi", sent, len(tokens))
+		log.Printf("admin bildirim: %d/%d gonderildi (gorsel: %t)", sent, len(tokens), image != "")
 	}()
 	redirectMsg(w, r, "Bildirim gonderiliyor…")
+}
+
+var allowedImageExt = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".gif": true,
+}
+
+// saveUpload yuklenen gorseli UploadDir'e kaydeder, herkese acik yolu doner.
+func (s *Server) saveUpload(file multipart.File, hdr *multipart.FileHeader) (string, error) {
+	ext := strings.ToLower(filepath.Ext(hdr.Filename))
+	if !allowedImageExt[ext] {
+		return "", fmt.Errorf("desteklenmeyen format (jpg/png/webp/gif)")
+	}
+	if err := os.MkdirAll(s.UploadDir, 0o755); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
+	dst, err := os.Create(filepath.Join(s.UploadDir, name))
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+	if _, err := io.Copy(dst, file); err != nil {
+		return "", err
+	}
+	return "/uploads/" + name, nil
+}
+
+func (s *Server) publicURL(r *http.Request, path string) string {
+	base := s.PublicBaseURL
+	if base == "" {
+		base = "https://" + r.Host
+	}
+	return strings.TrimRight(base, "/") + path
 }
 
 func parseUploadedSheet(r *http.Request) ([][]string, error) {
@@ -731,6 +787,8 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
  .pager{display:flex;gap:12px;align-items:center;margin-top:10px;font-size:14px}
  .pager a{color:#5C5CE0;text-decoration:none;font-weight:600}
  .sub{border-top:1px dashed #ddd;margin-top:12px;padding-top:12px}
+ .lists{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+ .lists>.card{flex:1;min-width:300px;margin:0}
 </style></head><body>
 <h1>Bulbi Admin</h1>
 <p class="muted">İçerik sürümü: {{.Version}} · Kelime: {{.WordsTotal}} · Soru: {{.QuestionsTotal}}</p>
@@ -739,10 +797,11 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
 {{if .PushEnabled}}
 <div class="card">
  <h2>📣 Bildirim gönder — tüm kullanıcılar</h2>
- <form method="post" action="/admin/notify">
+ <form method="post" action="/admin/notify" enctype="multipart/form-data">
   <input class="full" name="title" placeholder="Başlık" required>
   <input class="full" name="body" placeholder="İçerik" required>
-  <input class="full" name="image" placeholder="Görsel URL (opsiyonel)">
+  <div class="muted" style="margin-top:6px">Görsel (opsiyonel, jpg/png):</div>
+  <input type="file" name="image" accept="image/*">
   <button type="submit">Gönder</button>
   <div class="muted">Kayıtlı tüm cihazlara anında FCM bildirimi gider.</div>
  </form>
@@ -791,6 +850,7 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
  </div>
 </div>
 
+<div class="lists">
 <div class="card">
  <h2>Kelimeler ({{.WordsTotal}})</h2>
  <table><tr><th>Kelime</th><th>Harf</th><th></th></tr>
@@ -819,5 +879,6 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
   <span>Sayfa {{.QuestionPage}} / {{.QuestionPages}}</span>
   {{if lt .QuestionPage .QuestionPages}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage 1}}">Sonraki ›</a>{{end}}
  </div>
+</div>
 </div>
 </body></html>`))

@@ -98,6 +98,10 @@ func main() {
 		go bc.Run(ctx)
 	}
 
+	uploadDir := env("UPLOAD_DIR", "data/uploads")
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		log.Printf("upload dizini olusturulamadi: %v", err)
+	}
 	srv := &server.Server{
 		Store:           st,
 		Cache:           rc,
@@ -105,6 +109,8 @@ func main() {
 		AdminPassword:   os.Getenv("ADMIN_PASSWORD"),
 		RateLimitPerMin: envInt("RATE_LIMIT_PER_MIN", 120),
 		MinAppBuild:     envInt("MIN_APP_BUILD", 1),
+		UploadDir:       uploadDir,
+		PublicBaseURL:   os.Getenv("PUBLIC_BASE_URL"),
 	}
 	if srv.AdminPassword != "" {
 		log.Println("admin paneli etkin: /admin")
