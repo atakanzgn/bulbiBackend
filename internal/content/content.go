@@ -9,11 +9,13 @@ import (
 	"sync"
 )
 
-// Question quiz sorusu: metin, secenekler ve dogru secenegin indeksi.
+// Question quiz sorusu: metin, secenekler, dogru indeks + kategori/zorluk.
 type Question struct {
-	Q       string   `json:"q"`
-	Options []string `json:"options"`
-	Answer  int      `json:"answer"`
+	Q          string   `json:"q"`
+	Options    []string `json:"options"`
+	Answer     int      `json:"answer"`
+	Category   string   `json:"category,omitempty"`
+	Difficulty string   `json:"difficulty,omitempty"`
 }
 
 // Content bir icerik paketi.

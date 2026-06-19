@@ -25,10 +25,14 @@ Varsayılan adres: `:8080`. İçerik: `data/content.json`.
 |---|---|---|
 | `ADDR` | `:8080` | Dinlenecek adres |
 | `DATABASE_URL` | **(zorunlu)** | `postgres://kullanıcı:şifre@host:5432/bulbi?sslmode=disable` |
-| `CONTENT_PATH` | `data/content.json` | İçerik dosyası |
+| `CONTENT_PATH` | `data/content.json` | İlk seed dosyası (tablolar boşsa DB'ye aktarılır) |
 | `FCM_CREDENTIALS` | (boş) | Firebase servis hesabı JSON yolu — verilmezse push kapalı |
 | `FCM_PROJECT_ID` | (servis hesabından) | Firebase proje id |
 | `PUSH_HOUR` | `10` | Günlük bildirim saati (sunucu saati) |
+| `ADMIN_PASSWORD` | (boş) | `/admin` paneli parolası (kullanıcı `admin`) — boşsa panel kapalı |
+| `REDIS_URL` | (boş) | `redis://:şifre@redis:6379/0` — boşsa in-memory yedek (tek instance için yeterli) |
+| `RATE_LIMIT_PER_MIN` | `120` | IP başına dakikalık istek limiti (`/api/*`) |
+| `MIN_APP_BUILD` | `1` | Splash'te gerekli minimum uygulama build numarası |
 
 ## API uçları
 
@@ -41,11 +45,24 @@ Varsayılan adres: `:8080`. İçerik: `data/content.json`.
 | GET | `/api/v1/leaderboard?puzzle=&day=&deviceId=&limit=` | İlk N + benim sıram |
 | POST | `/api/v1/devices` | Push token kaydet `{deviceId,token,platform}` |
 
-`puzzle` ∈ `{word, number, quiz}`.
+`puzzle` ∈ `{word, number, quiz}`. Ayrıca `GET /api/v1/app` → `{minBuild, contentVersion}` (splash sürüm kontrolü).
 
-## İçeriği büyütme
+## Güvenlik & performans
 
-`data/content.json` içine kelime/soru ekle, `version` alanını artır, push'la → CI yeni imaj üretir → sunucuda `docker pull` + yeniden başlat. İçerik imaja gömülüdür; uygulama sürüm değişimini görünce yeni paketi indirir, **mağaza güncellemesi gerekmez.**
+- **IP rate limit:** `/api/*` için IP başına dakikalık limit (varsayılan 120) — aşılırsa `429`. Redis varsa Redis'te sayılır, yoksa in-memory.
+- **Admin brute-force:** 15 dk içinde 5 hatalı şifre → o IP geçici bloklanır (`429`).
+- **Gerçek IP:** Cloudflare turuncu bulut + NPM arkasında istemci IP'si `CF-Connecting-IP` (yoksa `X-Forwarded-For`) başlığından alınır.
+- **İçerik cache:** `/api/v1/content` Redis'te cache'lenir; admin değişikliğinde geçersiz kılınır ve her gün **TR 00:00**'da yeniden ısıtılır.
+
+## İçerik yönetimi — Admin paneli
+
+İçerik (kelime + soru) **PostgreSQL**'de tutulur. İlk açılışta tablolar boşsa `data/content.json`'dan **seed** edilir; sonrası **`/admin`** panelinden yönetilir (uygulamada gömülü veri yoktur).
+
+- `https://bulbi.atakanzgn.com.tr/admin` → kullanıcı `admin`, parola `ADMIN_PASSWORD`.
+- Kelime ekle/sil (harf sayısı otomatik) ve soru ekle/sil (tür + zorluk seçimiyle).
+- Her değişiklikte içerik sürümü otomatik artar; uygulama yeni içeriği indirir — **mağaza güncellemesi gerekmez.**
+
+> NPM zaten tüm alan adını backend'e proxylediği için panel `https://<alan-adı>/admin` adresinden erişilebilir.
 
 ## Push bildirim (Firebase)
 
@@ -76,13 +93,17 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: "postgres://bulbi:SIFRE@db:5432/bulbi?sslmode=disable"
+      REDIS_URL: "redis://redis:6379/0"
+      ADMIN_PASSWORD: "<ADMIN_SIFRE>"
       FCM_CREDENTIALS: "/run/secrets/fcm.json"
       FCM_PROJECT_ID: "<firebase-proje-id>"
       PUSH_HOUR: "10"
+      MIN_APP_BUILD: "1"
+      TZ: "Europe/Istanbul"
     volumes:
       - /root/bulbi/fcm.json:/run/secrets/fcm.json:ro
     networks: [proxy_net, internal]
-    depends_on: [db]
+    depends_on: [db, redis]
   db:
     image: postgres:17-alpine
     container_name: bulbi-db
@@ -93,6 +114,11 @@ services:
       POSTGRES_DB: bulbi
     volumes:
       - bulbi-pgdata:/var/lib/postgresql/data
+    networks: [internal]
+  redis:
+    image: redis:7-alpine
+    container_name: bulbi-redis
+    restart: unless-stopped
     networks: [internal]
 
 networks:

@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
+	"bulbi-backend/internal/cache"
 	"bulbi-backend/internal/content"
 	"bulbi-backend/internal/push"
 	"bulbi-backend/internal/server"
@@ -42,6 +44,30 @@ func main() {
 	defer st.Close()
 	log.Println("veritabani baglandi (postgres)")
 
+	// Tablolar bossa content.json'dan ilk icerigi seed et.
+	seedCtx, cancelSeed := context.WithTimeout(context.Background(), 30*time.Second)
+	seeded, err := st.SeedIfEmpty(seedCtx, c.Get())
+	cancelSeed()
+	if err != nil {
+		log.Printf("seed hatasi: %v", err)
+	} else if seeded {
+		log.Println("icerik DB'ye seed edildi (content.json)")
+	}
+
+	// Redis (opsiyonel): rate limit, admin brute-force ve icerik cache.
+	redisCtx, cancelRedis := context.WithTimeout(context.Background(), 10*time.Second)
+	rc, err := cache.New(redisCtx, os.Getenv("REDIS_URL"))
+	cancelRedis()
+	if err != nil {
+		log.Fatalf("redis baglanamadi: %v", err)
+	}
+	defer rc.Close()
+	if rc.Enabled() {
+		log.Println("redis: etkin")
+	} else {
+		log.Println("redis: devre disi (REDIS_URL yok) — in-memory yedek kullanilir")
+	}
+
 	// Push (opsiyonel): FCM_CREDENTIALS verilirse etkin.
 	var sender *push.Sender
 	if credPath := os.Getenv("FCM_CREDENTIALS"); credPath != "" {
@@ -72,7 +98,22 @@ func main() {
 		go bc.Run(ctx)
 	}
 
-	srv := &server.Server{Content: c, Store: st}
+	srv := &server.Server{
+		Store:           st,
+		Cache:           rc,
+		AdminPassword:   os.Getenv("ADMIN_PASSWORD"),
+		RateLimitPerMin: envInt("RATE_LIMIT_PER_MIN", 120),
+		MinAppBuild:     envInt("MIN_APP_BUILD", 1),
+	}
+	if srv.AdminPassword != "" {
+		log.Println("admin paneli etkin: /admin")
+	} else {
+		log.Println("admin paneli kapali (ADMIN_PASSWORD tanimli degil)")
+	}
+
+	// Icerik cache'ini isit + her gun TR 00:00'da yenile.
+	srv.RefreshContentCache(context.Background())
+	go dailyCacheRefresh(ctx, srv)
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Routes(),
@@ -107,4 +148,26 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// dailyCacheRefresh her gun Turkiye saatiyle 00:00'da icerik cache'ini yeniler.
+func dailyCacheRefresh(ctx context.Context, srv *server.Server) {
+	loc, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		loc = time.UTC
+	}
+	for {
+		now := time.Now().In(loc)
+		next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).
+			AddDate(0, 0, 1)
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			srv.RefreshContentCache(context.Background())
+			log.Println("icerik cache yenilendi (TR 00:00)")
+		}
+	}
 }
