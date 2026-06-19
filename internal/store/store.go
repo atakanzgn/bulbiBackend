@@ -5,12 +5,15 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"bulbi-backend/internal/content"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type Store struct{ pool *pgxpool.Pool }
@@ -252,12 +255,18 @@ func (s *Store) ContentBundle(ctx context.Context) (int, []string, []content.Que
 }
 
 func (s *Store) AddWord(ctx context.Context, text string) error {
+	t := upperTR(text)
 	if _, err := s.pool.Exec(ctx, `
 INSERT INTO words (text, length, created_at) VALUES ($1, $2, $3)
-ON CONFLICT (text) DO NOTHING`, text, len([]rune(text)), time.Now().Unix()); err != nil {
+ON CONFLICT (text) DO NOTHING`, t, len([]rune(t)), time.Now().Unix()); err != nil {
 		return err
 	}
 	return s.bumpVersion(ctx)
+}
+
+// upperTR Turkce kurallarina gore buyuk harfe cevirir (i->İ, ı->I).
+func upperTR(s string) string {
+	return cases.Upper(language.Turkish).String(strings.TrimSpace(s))
 }
 
 func (s *Store) DeleteWord(ctx context.Context, id int64) error {
@@ -360,4 +369,121 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, max(c.Version, 1)); err
 		return false, err
 	}
 	return true, nil
+}
+
+// --- Sayfalama ---
+
+func (s *Store) CountWords(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM words`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) CountQuestions(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM questions`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) ListWordsPaged(ctx context.Context, limit, offset int) ([]WordRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, text, length FROM words ORDER BY length, text LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WordRow{}
+	for rows.Next() {
+		var r WordRow
+		if err := rows.Scan(&r.ID, &r.Text, &r.Length); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListQuestionsPaged(ctx context.Context, limit, offset int) ([]QuestionRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, q, options, answer, category, difficulty FROM questions ORDER BY id DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []QuestionRow{}
+	for rows.Next() {
+		var r QuestionRow
+		if err := rows.Scan(&r.ID, &r.Q, &r.Options, &r.Answer, &r.Category, &r.Difficulty); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// --- Toplu ice aktarma (Excel) ---
+
+// ImportWords verilen kelimeleri (Turkce buyuk harfe cevirip) ekler; eklenen
+// yeni kelime sayisini doner.
+func (s *Store) ImportWords(ctx context.Context, words []string) (int, error) {
+	now := time.Now().Unix()
+	added := 0
+	for _, w := range words {
+		t := upperTR(w)
+		if t == "" {
+			continue
+		}
+		tag, err := s.pool.Exec(ctx, `
+INSERT INTO words (text, length, created_at) VALUES ($1, $2, $3)
+ON CONFLICT (text) DO NOTHING`, t, len([]rune(t)), now)
+		if err != nil {
+			return added, err
+		}
+		added += int(tag.RowsAffected())
+	}
+	if len(words) > 0 {
+		if err := s.bumpVersion(ctx); err != nil {
+			return added, err
+		}
+	}
+	return added, nil
+}
+
+// ImportQuestions verilen sorulari ekler; eklenen soru sayisini doner.
+func (s *Store) ImportQuestions(ctx context.Context, qs []content.Question) (int, error) {
+	now := time.Now().Unix()
+	added := 0
+	for _, q := range qs {
+		if q.Q == "" || len(q.Options) < 2 || q.Answer < 0 || q.Answer >= len(q.Options) {
+			continue
+		}
+		cat := q.Category
+		if cat == "" {
+			cat = "genel"
+		}
+		diff := q.Difficulty
+		if diff == "" {
+			diff = "orta"
+		}
+		if _, err := s.pool.Exec(ctx, `
+INSERT INTO questions (q, options, answer, category, difficulty, created_at)
+VALUES ($1, $2, $3, $4, $5, $6)`, q.Q, q.Options, q.Answer, cat, diff, now); err != nil {
+			return added, err
+		}
+		added++
+	}
+	if added > 0 {
+		if err := s.bumpVersion(ctx); err != nil {
+			return added, err
+		}
+	}
+	return added, nil
+}
+
+// DeleteDevice bir cihazin push token kaydini siler (bildirim kapatildiginda).
+func (s *Store) DeleteDevice(ctx context.Context, deviceID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM devices WHERE device_id=$1`, deviceID)
+	return err
 }

@@ -66,19 +66,20 @@ func NewSender(credentialsJSON []byte, projectID string) (*Sender, error) {
 	}, nil
 }
 
-// Send tek bir cihaz token'ina bildirim gonderir.
-func (s *Sender) Send(ctx context.Context, token, title, body string) error {
+// Send tek bir cihaz token'ina bildirim gonderir ([image] opsiyonel gorsel URL).
+func (s *Sender) Send(ctx context.Context, token, title, body, image string) error {
 	at, err := s.token(ctx)
 	if err != nil {
 		return err
 	}
+	notif := map[string]any{"title": title, "body": body}
+	if image != "" {
+		notif["image"] = image
+	}
 	payload := map[string]any{
 		"message": map[string]any{
-			"token": token,
-			"notification": map[string]any{
-				"title": title,
-				"body":  body,
-			},
+			"token":        token,
+			"notification": notif,
 		},
 	}
 	b, _ := json.Marshal(payload)
@@ -97,6 +98,34 @@ func (s *Sender) Send(ctx context.Context, token, title, body string) error {
 		return fmt.Errorf("fcm gonderim hatasi %s: %s", resp.Status, string(msg))
 	}
 	return nil
+}
+
+// SendToAll tum token'lara ayni bildirimi eszamanli gonderir; basarili sayisini doner.
+func (s *Sender) SendToAll(ctx context.Context, tokens []string, title, body, image string) int {
+	const workers = 16
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	sent := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for tok := range jobs {
+				if err := s.Send(ctx, tok, title, body, image); err == nil {
+					mu.Lock()
+					sent++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, t := range tokens {
+		jobs <- t
+	}
+	close(jobs)
+	wg.Wait()
+	return sent
 }
 
 // token gecerli bir OAuth2 erisim token'i dondurur (onbellekli).
@@ -219,14 +248,7 @@ func (b *Broadcaster) broadcast(ctx context.Context) {
 		log.Printf("push: token listesi alinamadi: %v", err)
 		return
 	}
-	sent := 0
-	for _, t := range tokens {
-		if err := b.Sender.Send(ctx, t, b.Title, b.Body); err != nil {
-			log.Printf("push: gonderim hatasi: %v", err)
-			continue
-		}
-		sent++
-	}
+	sent := b.Sender.SendToAll(ctx, tokens, b.Title, b.Body, "")
 	log.Printf("push: %d/%d bildirim gonderildi", sent, len(tokens))
 }
 

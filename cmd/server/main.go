@@ -101,6 +101,7 @@ func main() {
 	srv := &server.Server{
 		Store:           st,
 		Cache:           rc,
+		Push:            sender,
 		AdminPassword:   os.Getenv("ADMIN_PASSWORD"),
 		RateLimitPerMin: envInt("RATE_LIMIT_PER_MIN", 120),
 		MinAppBuild:     envInt("MIN_APP_BUILD", 1),

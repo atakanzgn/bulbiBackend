@@ -6,28 +6,37 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"bulbi-backend/internal/cache"
+	"bulbi-backend/internal/content"
+	"bulbi-backend/internal/push"
 	"bulbi-backend/internal/store"
+
+	"github.com/xuri/excelize/v2"
 )
 
 type Server struct {
 	Store           *store.Store
 	Cache           *cache.Cache
+	Push            *push.Sender
 	AdminPassword   string // bos ise admin paneli kapali
 	RateLimitPerMin int    // 0 -> 120
 	MinAppBuild     int    // istemcinin gerektirdigi minimum build numarasi
 
 	mem *memStore
 }
+
+const adminPageSize = 50
 
 const cacheKeyBundle = "content:bundle"
 
@@ -46,6 +55,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/scores", s.postScore)
 	mux.HandleFunc("GET /api/v1/leaderboard", s.getLeaderboard)
 	mux.HandleFunc("POST /api/v1/devices", s.postDevice)
+	mux.HandleFunc("POST /api/v1/devices/delete", s.postDeviceDelete)
 
 	// Admin paneli (Basic Auth, ADMIN_PASSWORD)
 	mux.HandleFunc("GET /admin", s.adminGuard(s.adminHome))
@@ -53,6 +63,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/words/delete", s.adminGuard(s.adminDeleteWord))
 	mux.HandleFunc("POST /admin/questions", s.adminGuard(s.adminAddQuestion))
 	mux.HandleFunc("POST /admin/questions/delete", s.adminGuard(s.adminDeleteQuestion))
+	mux.HandleFunc("POST /admin/import/words", s.adminGuard(s.adminImportWords))
+	mux.HandleFunc("POST /admin/import/questions", s.adminGuard(s.adminImportQuestions))
+	mux.HandleFunc("POST /admin/notify", s.adminGuard(s.adminNotify))
 
 	return cors(s.rateLimit(logging(mux)))
 }
@@ -205,6 +218,25 @@ func (s *Server) postDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Store.SaveDevice(r.Context(), req.DeviceID, req.Token, req.Platform); err != nil {
 		writeError(w, http.StatusInternalServerError, "cihaz kaydedilemedi")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// postDeviceDelete bildirim kapatildiginda cihaz token kaydini siler.
+func (s *Server) postDeviceDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID string `json:"deviceId"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "deviceId gerekli")
+		return
+	}
+	if err := s.Store.DeleteDevice(r.Context(), req.DeviceID); err != nil {
+		writeError(w, http.StatusInternalServerError, "cihaz silinemedi")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -414,18 +446,45 @@ func (s *Server) adminGuard(next http.HandlerFunc) http.HandlerFunc {
 }
 
 type adminData struct {
-	Version   int
-	Words     []store.WordRow
-	Questions []store.QuestionRow
+	Version        int
+	Words          []store.WordRow
+	Questions      []store.QuestionRow
+	WordsTotal     int
+	QuestionsTotal int
+	WordPage       int
+	WordPages      int
+	QuestionPage   int
+	QuestionPages  int
+	PushEnabled    bool
+	Notice         string
+}
+
+func pageParam(r *http.Request, key string) int {
+	if p, err := strconv.Atoi(r.URL.Query().Get(key)); err == nil && p > 0 {
+		return p
+	}
+	return 1
+}
+
+func pageCount(total, size int) int {
+	if total <= 0 {
+		return 1
+	}
+	return (total + size - 1) / size
 }
 
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
-	words, err := s.Store.ListWords(r.Context())
+	wp := pageParam(r, "wp")
+	qp := pageParam(r, "qp")
+	wordsTotal, _ := s.Store.CountWords(r.Context())
+	qTotal, _ := s.Store.CountQuestions(r.Context())
+	words, err := s.Store.ListWordsPaged(r.Context(), adminPageSize, (wp-1)*adminPageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	questions, err := s.Store.ListQuestions(r.Context())
+	questions, err :=
+		s.Store.ListQuestionsPaged(r.Context(), adminPageSize, (qp-1)*adminPageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -433,11 +492,175 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	version, _ := s.Store.ContentVersion(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := adminTmpl.Execute(w, adminData{
-		Version:   version,
-		Words:     words,
-		Questions: questions,
+		Version:        version,
+		Words:          words,
+		Questions:      questions,
+		WordsTotal:     wordsTotal,
+		QuestionsTotal: qTotal,
+		WordPage:       wp,
+		WordPages:      pageCount(wordsTotal, adminPageSize),
+		QuestionPage:   qp,
+		QuestionPages:  pageCount(qTotal, adminPageSize),
+		PushEnabled:    s.Push != nil,
+		Notice:         r.URL.Query().Get("msg"),
 	}); err != nil {
 		log.Printf("admin template: %v", err)
+	}
+}
+
+func redirectMsg(w http.ResponseWriter, r *http.Request, msg string) {
+	http.Redirect(w, r, "/admin?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+}
+
+func (s *Server) adminImportWords(w http.ResponseWriter, r *http.Request) {
+	rows, err := parseUploadedSheet(r)
+	if err != nil {
+		redirectMsg(w, r, "Excel okunamadi: "+err.Error())
+		return
+	}
+	words := make([]string, 0, len(rows))
+	for i, row := range rows {
+		c := strings.TrimSpace(cell(row, 0))
+		if c == "" || (i == 0 && isHeader(c, "kelime", "word")) {
+			continue
+		}
+		words = append(words, c)
+	}
+	n, err := s.Store.ImportWords(r.Context(), words)
+	if err != nil {
+		redirectMsg(w, r, "Hata: "+err.Error())
+		return
+	}
+	s.Cache.Del(r.Context(), cacheKeyBundle)
+	redirectMsg(w, r, fmt.Sprintf("%d kelime eklendi", n))
+}
+
+func (s *Server) adminImportQuestions(w http.ResponseWriter, r *http.Request) {
+	rows, err := parseUploadedSheet(r)
+	if err != nil {
+		redirectMsg(w, r, "Excel okunamadi: "+err.Error())
+		return
+	}
+	qs := make([]content.Question, 0, len(rows))
+	for i, row := range rows {
+		q := strings.TrimSpace(cell(row, 0))
+		if q == "" || (i == 0 && isHeader(q, "soru", "question")) {
+			continue
+		}
+		opts := []string{}
+		for c := 1; c <= 4; c++ {
+			if v := strings.TrimSpace(cell(row, c)); v != "" {
+				opts = append(opts, v)
+			}
+		}
+		if len(opts) < 2 {
+			continue
+		}
+		ans, _ := strconv.Atoi(strings.TrimSpace(cell(row, 5)))
+		ans-- // Excel'de 1-tabanli -> 0-tabanli
+		if ans < 0 || ans >= len(opts) {
+			ans = 0
+		}
+		qs = append(qs, content.Question{
+			Q:          q,
+			Options:    opts,
+			Answer:     ans,
+			Category:   normCat(cell(row, 6)),
+			Difficulty: normDiff(cell(row, 7)),
+		})
+	}
+	n, err := s.Store.ImportQuestions(r.Context(), qs)
+	if err != nil {
+		redirectMsg(w, r, "Hata: "+err.Error())
+		return
+	}
+	s.Cache.Del(r.Context(), cacheKeyBundle)
+	redirectMsg(w, r, fmt.Sprintf("%d soru eklendi", n))
+}
+
+func (s *Server) adminNotify(w http.ResponseWriter, r *http.Request) {
+	if s.Push == nil {
+		redirectMsg(w, r, "Push kapali (FCM yapilandirilmamis)")
+		return
+	}
+	title := strings.TrimSpace(r.FormValue("title"))
+	body := strings.TrimSpace(r.FormValue("body"))
+	image := strings.TrimSpace(r.FormValue("image"))
+	if title == "" || body == "" {
+		redirectMsg(w, r, "Baslik ve icerik gerekli")
+		return
+	}
+	go func() {
+		tokens, err := s.Store.AllTokens(context.Background())
+		if err != nil {
+			log.Printf("notify: token listesi: %v", err)
+			return
+		}
+		sent := s.Push.SendToAll(context.Background(), tokens, title, body, image)
+		log.Printf("admin bildirim: %d/%d gonderildi", sent, len(tokens))
+	}()
+	redirectMsg(w, r, "Bildirim gonderiliyor…")
+}
+
+func parseUploadedSheet(r *http.Request) ([][]string, error) {
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		return nil, err
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	f, err := excelize.OpenReader(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	sheets := f.GetSheetList()
+	if len(sheets) == 0 {
+		return nil, fmt.Errorf("bos dosya")
+	}
+	return f.GetRows(sheets[0])
+}
+
+func cell(row []string, i int) string {
+	if i < len(row) {
+		return row[i]
+	}
+	return ""
+}
+
+func isHeader(v string, keys ...string) bool {
+	lv := strings.ToLower(strings.TrimSpace(v))
+	for _, k := range keys {
+		if lv == k {
+			return true
+		}
+	}
+	return false
+}
+
+func normCat(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "spor":
+		return "spor"
+	case "bilim":
+		return "bilim"
+	case "sanat":
+		return "sanat"
+	default:
+		return "genel"
+	}
+}
+
+func normDiff(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "kolay":
+		return "kolay"
+	case "zor":
+		return "zor"
+	default:
+		return "orta"
 	}
 }
 
@@ -487,13 +710,15 @@ func (s *Server) adminDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-var adminTmpl = template.Must(template.New("admin").Parse(`<!doctype html>
+var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
+	"add": func(a, b int) int { return a + b },
+}).Parse(`<!doctype html>
 <html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bulbi Admin</title>
 <style>
  body{font-family:system-ui,Arial,sans-serif;max-width:920px;margin:0 auto;padding:20px;background:#f6f6fb;color:#1a1a2e}
- h1{color:#5C5CE0;margin-bottom:0} h2{margin-top:0}
+ h1{color:#5C5CE0;margin-bottom:0} h2{margin-top:0;font-size:18px}
  .card{background:#fff;border-radius:12px;padding:16px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
  input,select{padding:8px;border:1px solid #ccd;border-radius:8px;margin:4px 4px 4px 0;font-size:14px}
  input.full{width:100%}
@@ -502,17 +727,41 @@ var adminTmpl = template.Must(template.New("admin").Parse(`<!doctype html>
  table{width:100%;border-collapse:collapse;margin-top:8px}
  td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #eee;font-size:14px;vertical-align:top}
  .muted{color:#888;font-size:13px}
+ .notice{background:#e6f7ec;border:1px solid #9bdcb4;color:#176b3a;padding:10px 14px;border-radius:10px;margin:12px 0}
+ .pager{display:flex;gap:12px;align-items:center;margin-top:10px;font-size:14px}
+ .pager a{color:#5C5CE0;text-decoration:none;font-weight:600}
+ .sub{border-top:1px dashed #ddd;margin-top:12px;padding-top:12px}
 </style></head><body>
 <h1>Bulbi Admin</h1>
-<p class="muted">İçerik sürümü: {{.Version}} · Kelime: {{len .Words}} · Soru: {{len .Questions}}</p>
+<p class="muted">İçerik sürümü: {{.Version}} · Kelime: {{.WordsTotal}} · Soru: {{.QuestionsTotal}}</p>
+{{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
+
+{{if .PushEnabled}}
+<div class="card">
+ <h2>📣 Bildirim gönder — tüm kullanıcılar</h2>
+ <form method="post" action="/admin/notify">
+  <input class="full" name="title" placeholder="Başlık" required>
+  <input class="full" name="body" placeholder="İçerik" required>
+  <input class="full" name="image" placeholder="Görsel URL (opsiyonel)">
+  <button type="submit">Gönder</button>
+  <div class="muted">Kayıtlı tüm cihazlara anında FCM bildirimi gider.</div>
+ </form>
+</div>
+{{end}}
 
 <div class="card">
  <h2>Kelime ekle</h2>
  <form method="post" action="/admin/words">
-  <input name="text" placeholder="BÜYÜK harfle, örn. ARABA" required>
+  <input name="text" placeholder="örn. araba (otomatik BÜYÜK harfe çevrilir)" required>
   <button type="submit">Ekle</button>
-  <div class="muted">Harf sayısı otomatik hesaplanır (oyunda 5/6/7 harfliler kullanılır).</div>
  </form>
+ <div class="sub">
+  <form method="post" action="/admin/import/words" enctype="multipart/form-data">
+   <b>Excel ile toplu:</b> <input type="file" name="file" accept=".xlsx" required>
+   <button type="submit">Yükle</button>
+   <div class="muted">A sütununda kelimeler (her satır bir kelime). Başlık satırı atlanır.</div>
+  </form>
+ </div>
 </div>
 
 <div class="card">
@@ -533,18 +782,30 @@ var adminTmpl = template.Must(template.New("admin").Parse(`<!doctype html>
    <button type="submit">Ekle</button>
   </div>
  </form>
+ <div class="sub">
+  <form method="post" action="/admin/import/questions" enctype="multipart/form-data">
+   <b>Excel ile toplu:</b> <input type="file" name="file" accept=".xlsx" required>
+   <button type="submit">Yükle</button>
+   <div class="muted">Sütunlar: Soru | Seçenek1 | Seçenek2 | Seçenek3 | Seçenek4 | Doğru(1-4) | Tür | Zorluk</div>
+  </form>
+ </div>
 </div>
 
 <div class="card">
- <h2>Kelimeler ({{len .Words}})</h2>
+ <h2>Kelimeler ({{.WordsTotal}})</h2>
  <table><tr><th>Kelime</th><th>Harf</th><th></th></tr>
  {{range .Words}}<tr><td>{{.Text}}</td><td>{{.Length}}</td>
   <td><form method="post" action="/admin/words/delete" onsubmit="return confirm('Silinsin mi?')"><input type="hidden" name="id" value="{{.ID}}"><button class="del" type="submit">Sil</button></form></td></tr>{{end}}
  </table>
+ <div class="pager">
+  {{if gt .WordPage 1}}<a href="/admin?wp={{add .WordPage -1}}&qp={{.QuestionPage}}">‹ Önceki</a>{{end}}
+  <span>Sayfa {{.WordPage}} / {{.WordPages}}</span>
+  {{if lt .WordPage .WordPages}}<a href="/admin?wp={{add .WordPage 1}}&qp={{.QuestionPage}}">Sonraki ›</a>{{end}}
+ </div>
 </div>
 
 <div class="card">
- <h2>Sorular ({{len .Questions}})</h2>
+ <h2>Sorular ({{.QuestionsTotal}})</h2>
  <table><tr><th>Soru</th><th>Tür / Zorluk</th><th>Doğru</th><th></th></tr>
  {{range .Questions}}<tr>
   <td>{{.Q}}<div class="muted">{{range .Options}}{{.}} &middot; {{end}}</div></td>
@@ -553,5 +814,10 @@ var adminTmpl = template.Must(template.New("admin").Parse(`<!doctype html>
   <td><form method="post" action="/admin/questions/delete" onsubmit="return confirm('Silinsin mi?')"><input type="hidden" name="id" value="{{.ID}}"><button class="del" type="submit">Sil</button></form></td>
  </tr>{{end}}
  </table>
+ <div class="pager">
+  {{if gt .QuestionPage 1}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage -1}}">‹ Önceki</a>{{end}}
+  <span>Sayfa {{.QuestionPage}} / {{.QuestionPages}}</span>
+  {{if lt .QuestionPage .QuestionPages}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage 1}}">Sonraki ›</a>{{end}}
+ </div>
 </div>
 </body></html>`))
