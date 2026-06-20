@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -102,6 +103,8 @@ func main() {
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
 		log.Printf("upload dizini olusturulamadi: %v", err)
 	}
+	// Eski bildirim gorsellerini periyodik temizle (varsayilan 30 gun).
+	go cleanupUploads(ctx, uploadDir, envInt("UPLOAD_RETENTION_DAYS", 30))
 	srv := &server.Server{
 		Store:           st,
 		Cache:           rc,
@@ -155,6 +158,50 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// cleanupUploads UploadDir'deki retentionDays'ten eski gorselleri her gun siler.
+// retentionDays <= 0 ise temizleme kapalidir.
+func cleanupUploads(ctx context.Context, dir string, retentionDays int) {
+	if retentionDays <= 0 {
+		return
+	}
+	run := func() {
+		cutoff := time.Now().AddDate(0, 0, -retentionDays)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		removed := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Before(cutoff) {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+					removed++
+				}
+			}
+		}
+		if removed > 0 {
+			log.Printf("upload temizligi: %d eski gorsel silindi (>%d gun)", removed, retentionDays)
+		}
+	}
+	run() // baslangicta bir kez
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 // dailyCacheRefresh her gun Turkiye saatiyle 00:00'da icerik cache'ini yeniler.

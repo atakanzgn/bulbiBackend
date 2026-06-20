@@ -35,6 +35,7 @@ Varsayılan adres: `:8080`. İçerik: `data/content.json`.
 | `MIN_APP_BUILD` | `1` | Splash'te gerekli minimum uygulama build numarası |
 | `UPLOAD_DIR` | `data/uploads` | Bildirim görselleri klasörü (kalıcılık için volume bağla) |
 | `PUBLIC_BASE_URL` | (boş) | Görsel URL tabanı (boşsa istek Host'undan); örn. `https://bulbi.atakanzgn.com.tr` |
+| `UPLOAD_RETENTION_DAYS` | `30` | Yüklenen bildirim görsellerinin saklanma süresi (gün); eskiler otomatik silinir (`0` = kapalı) |
 
 ## API uçları
 

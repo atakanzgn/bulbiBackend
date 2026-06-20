@@ -73,15 +73,20 @@ func (s *Sender) Send(ctx context.Context, token, title, body, image string) err
 		return err
 	}
 	notif := map[string]any{"title": title, "body": body}
+	message := map[string]any{
+		"token":        token,
+		"notification": notif,
+	}
 	if image != "" {
-		notif["image"] = image
+		notif["image"] = image // Android + platformlar arasi kisayol
+		// iOS: gorselin gorunmesi icin mutable-content=1 (uygulamadaki
+		// Notification Service Extension'i tetikler) + fcm_options.image.
+		message["apns"] = map[string]any{
+			"payload":     map[string]any{"aps": map[string]any{"mutable-content": 1}},
+			"fcm_options": map[string]any{"image": image},
+		}
 	}
-	payload := map[string]any{
-		"message": map[string]any{
-			"token":        token,
-			"notification": notif,
-		},
-	}
+	payload := map[string]any{"message": message}
 	b, _ := json.Marshal(payload)
 	endpoint := fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", s.projectID)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
