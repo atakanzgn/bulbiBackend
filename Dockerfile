@@ -16,6 +16,9 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=build /out/bulbi-backend /app/bulbi-backend
 COPY data/content.json /app/data/content.json
+# Yuklenen bildirim gorselleri icin yazilabilir dizin (app kullanicisina ait).
+# Bos named volume ilk baglandiginda Docker bu sahipligi kopyalar.
+RUN mkdir -p /app/data/uploads && chown -R app:app /app/data
 USER app
 ENV ADDR=":8080" \
     CONTENT_PATH="/app/data/content.json"
