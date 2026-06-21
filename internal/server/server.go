@@ -46,7 +46,14 @@ const adminPageSize = 20
 
 const cacheKeyBundle = "content:bundle"
 
-var validPuzzles = map[string]bool{"word": true, "number": true, "quiz": true}
+var validPuzzles = map[string]bool{
+	"word": true, "number": true, "quiz": true,
+	// "daily": bugun cozulen gunluk oyun sayisi (birlesik liderlik).
+	"daily": true,
+	// Ileride oyun-bazli liderlik acmak istenirse hazir.
+	"hangman": true, "wordsearch": true, "sudoku": true,
+	"connections": true, "memory": true,
+}
 
 // Routes tum uclari baglayip middleware ile sarar.
 func (s *Server) Routes() http.Handler {
