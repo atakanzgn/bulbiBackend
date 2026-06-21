@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -60,6 +61,11 @@ var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS meta (
 		key   TEXT   PRIMARY KEY,
 		value BIGINT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS connections (
+		id         BIGSERIAL PRIMARY KEY,
+		data       JSONB     NOT NULL,
+		created_at BIGINT    NOT NULL
 	)`,
 }
 
@@ -212,46 +218,71 @@ ON CONFLICT (key) DO UPDATE SET value = meta.value + 1`)
 	return err
 }
 
-// ContentBundle uygulamaya sunulacak paketi (surum + kelimeler + sorular) doner.
-func (s *Store) ContentBundle(ctx context.Context) (int, []string, []content.Question, error) {
+// ContentBundle uygulamaya sunulacak paketi (surum + kelimeler + sorular +
+// baglantilar) doner.
+func (s *Store) ContentBundle(ctx context.Context) (int, []string, []content.Question, []content.ConnectionPuzzle, error) {
 	version, err := s.ContentVersion(ctx)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, err
 	}
 
 	wrows, err := s.pool.Query(ctx, `SELECT text FROM words ORDER BY id`)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, err
 	}
 	words := []string{}
 	for wrows.Next() {
 		var t string
 		if err := wrows.Scan(&t); err != nil {
 			wrows.Close()
-			return 0, nil, nil, err
+			return 0, nil, nil, nil, err
 		}
 		words = append(words, t)
 	}
 	wrows.Close()
 	if err := wrows.Err(); err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, err
 	}
 
 	qrows, err := s.pool.Query(ctx,
 		`SELECT q, options, answer, category, difficulty FROM questions ORDER BY id`)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, err
 	}
-	defer qrows.Close()
 	questions := []content.Question{}
 	for qrows.Next() {
 		var q content.Question
 		if err := qrows.Scan(&q.Q, &q.Options, &q.Answer, &q.Category, &q.Difficulty); err != nil {
-			return 0, nil, nil, err
+			qrows.Close()
+			return 0, nil, nil, nil, err
 		}
 		questions = append(questions, q)
 	}
-	return version, words, questions, qrows.Err()
+	qrows.Close()
+	if err := qrows.Err(); err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	crows, err := s.pool.Query(ctx, `SELECT data FROM connections ORDER BY id`)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	conns := []content.ConnectionPuzzle{}
+	for crows.Next() {
+		var raw []byte
+		if err := crows.Scan(&raw); err != nil {
+			crows.Close()
+			return 0, nil, nil, nil, err
+		}
+		var p content.ConnectionPuzzle
+		if err := json.Unmarshal(raw, &p); err != nil {
+			crows.Close()
+			return 0, nil, nil, nil, err
+		}
+		conns = append(conns, p)
+	}
+	crows.Close()
+	return version, words, questions, conns, crows.Err()
 }
 
 func (s *Store) AddWord(ctx context.Context, text string) error {
@@ -268,6 +299,9 @@ ON CONFLICT (text) DO NOTHING`, t, len([]rune(t)), time.Now().Unix()); err != ni
 func upperTR(s string) string {
 	return cases.Upper(language.Turkish).String(strings.TrimSpace(s))
 }
+
+// UpperTR upperTR'nin disa acik halidir (or. admin baglanti ekleme).
+func UpperTR(s string) string { return upperTR(s) }
 
 func (s *Store) DeleteWord(ctx context.Context, id int64) error {
 	if _, err := s.pool.Exec(ctx, `DELETE FROM words WHERE id=$1`, id); err != nil {
@@ -327,6 +361,86 @@ func (s *Store) ListQuestions(ctx context.Context) ([]QuestionRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// --- Baglantilar (Connections) ---
+
+type ConnectionRow struct {
+	ID     int64
+	Groups []content.ConnectionGroup
+}
+
+func (s *Store) CountConnections(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM connections`).Scan(&n)
+	return n, err
+}
+
+func (s *Store) AddConnection(ctx context.Context, p content.ConnectionPuzzle) error {
+	data, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO connections (data, created_at) VALUES ($1, $2)`,
+		data, time.Now().Unix()); err != nil {
+		return err
+	}
+	return s.bumpVersion(ctx)
+}
+
+func (s *Store) DeleteConnection(ctx context.Context, id int64) error {
+	if _, err := s.pool.Exec(ctx, `DELETE FROM connections WHERE id=$1`, id); err != nil {
+		return err
+	}
+	return s.bumpVersion(ctx)
+}
+
+func (s *Store) ListConnections(ctx context.Context) ([]ConnectionRow, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, data FROM connections ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ConnectionRow{}
+	for rows.Next() {
+		var id int64
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, err
+		}
+		var p content.ConnectionPuzzle
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		out = append(out, ConnectionRow{ID: id, Groups: p.Groups})
+	}
+	return out, rows.Err()
+}
+
+// SeedConnectionsIfEmpty connections tablosu bossa verilen icerikten doldurur
+// (kelime/soru'dan bagimsiz; mevcut kurulumlara da eklenebilsin diye).
+func (s *Store) SeedConnectionsIfEmpty(ctx context.Context, c content.Content) (bool, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM connections`).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 || len(c.Connections) == 0 {
+		return false, nil
+	}
+	now := time.Now().Unix()
+	for _, p := range c.Connections {
+		data, err := json.Marshal(p)
+		if err != nil {
+			return false, err
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO connections (data, created_at) VALUES ($1, $2)`,
+			data, now); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // SeedIfEmpty kelime/soru tablolari tamamen bossa verilen icerikten doldurur.

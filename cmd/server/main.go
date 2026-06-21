@@ -55,6 +55,15 @@ func main() {
 		log.Println("icerik DB'ye seed edildi (content.json)")
 	}
 
+	connSeedCtx, cancelConnSeed := context.WithTimeout(context.Background(), 15*time.Second)
+	connSeeded, err := st.SeedConnectionsIfEmpty(connSeedCtx, c.Get())
+	cancelConnSeed()
+	if err != nil {
+		log.Printf("baglanti seed hatasi: %v", err)
+	} else if connSeeded {
+		log.Println("baglantilar DB'ye seed edildi")
+	}
+
 	// Redis (opsiyonel): rate limit, admin brute-force ve icerik cache.
 	redisCtx, cancelRedis := context.WithTimeout(context.Background(), 10*time.Second)
 	rc, err := cache.New(redisCtx, os.Getenv("REDIS_URL"))

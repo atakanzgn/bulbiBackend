@@ -18,11 +18,24 @@ type Question struct {
 	Difficulty string   `json:"difficulty,omitempty"`
 }
 
+// ConnectionGroup "Baglantilar" oyununda ortak temali 4 kelime.
+type ConnectionGroup struct {
+	Category string   `json:"category"`
+	Words    []string `json:"words"`
+	Level    int      `json:"level"` // 0-3 zorluk/renk
+}
+
+// ConnectionPuzzle 4 gruptan (16 kelime) olusan bir baglanti bulmacasi.
+type ConnectionPuzzle struct {
+	Groups []ConnectionGroup `json:"groups"`
+}
+
 // Content bir icerik paketi.
 type Content struct {
-	Version   int        `json:"version"`
-	Words     []string   `json:"words"`
-	Questions []Question `json:"questions"`
+	Version     int                `json:"version"`
+	Words       []string           `json:"words"`
+	Questions   []Question         `json:"questions"`
+	Connections []ConnectionPuzzle `json:"connections,omitempty"`
 }
 
 // Store icerigi bellekte tutar; dosyadan yeniden yuklenebilir (eszamanli guvenli).

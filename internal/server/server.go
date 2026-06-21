@@ -72,6 +72,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/import/words", s.adminGuard(s.adminImportWords))
 	mux.HandleFunc("POST /admin/import/questions", s.adminGuard(s.adminImportQuestions))
 	mux.HandleFunc("POST /admin/notify", s.adminGuard(s.adminNotify))
+	mux.HandleFunc("POST /admin/connections", s.adminGuard(s.adminAddConnection))
+	mux.HandleFunc("POST /admin/connections/delete",
+		s.adminGuard(s.adminDeleteConnection))
 
 	// Yuklenen bildirim gorselleri (FCM image URL'i icin herkese acik).
 	mux.Handle("GET /uploads/",
@@ -103,14 +106,15 @@ func (s *Server) getContent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildContentJSON(ctx context.Context) ([]byte, error) {
-	version, words, questions, err := s.Store.ContentBundle(ctx)
+	version, words, questions, connections, err := s.Store.ContentBundle(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{
-		"version":   version,
-		"words":     words,
-		"questions": questions,
+		"version":     version,
+		"words":       words,
+		"questions":   questions,
+		"connections": connections,
 	})
 }
 
@@ -465,6 +469,8 @@ type adminData struct {
 	WordPages      int
 	QuestionPage   int
 	QuestionPages  int
+	Connections      []store.ConnectionRow
+	ConnectionsTotal int
 	PushEnabled    bool
 	Notice         string
 }
@@ -500,19 +506,22 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version, _ := s.Store.ContentVersion(r.Context())
+	conns, _ := s.Store.ListConnections(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := adminTmpl.Execute(w, adminData{
-		Version:        version,
-		Words:          words,
-		Questions:      questions,
-		WordsTotal:     wordsTotal,
-		QuestionsTotal: qTotal,
-		WordPage:       wp,
-		WordPages:      pageCount(wordsTotal, adminPageSize),
-		QuestionPage:   qp,
-		QuestionPages:  pageCount(qTotal, adminPageSize),
-		PushEnabled:    s.Push != nil,
-		Notice:         r.URL.Query().Get("msg"),
+		Version:          version,
+		Words:            words,
+		Questions:        questions,
+		WordsTotal:       wordsTotal,
+		QuestionsTotal:   qTotal,
+		WordPage:         wp,
+		WordPages:        pageCount(wordsTotal, adminPageSize),
+		QuestionPage:     qp,
+		QuestionPages:    pageCount(qTotal, adminPageSize),
+		Connections:      conns,
+		ConnectionsTotal: len(conns),
+		PushEnabled:      s.Push != nil,
+		Notice:           r.URL.Query().Get("msg"),
 	}); err != nil {
 		log.Printf("admin template: %v", err)
 	}
@@ -543,6 +552,58 @@ func (s *Server) adminImportWords(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Cache.Del(r.Context(), cacheKeyBundle)
 	redirectMsg(w, r, fmt.Sprintf("%d kelime eklendi", n))
+}
+
+// adminAddConnection: her satir bir grup -> "Kategori: k1,k2,k3,k4" (4 satir).
+func (s *Server) adminAddConnection(w http.ResponseWriter, r *http.Request) {
+	var groups []content.ConnectionGroup
+	for _, ln := range strings.Split(r.FormValue("groups"), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		parts := strings.SplitN(ln, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		cat := strings.TrimSpace(parts[0])
+		var ws []string
+		for _, x := range strings.Split(parts[1], ",") {
+			x = store.UpperTR(x)
+			if x != "" {
+				ws = append(ws, x)
+			}
+		}
+		if cat == "" || len(ws) != 4 {
+			continue
+		}
+		groups = append(groups, content.ConnectionGroup{
+			Category: cat,
+			Words:    ws,
+			Level:    len(groups),
+		})
+	}
+	if len(groups) != 4 {
+		redirectMsg(w, r, "4 grup gerekli; her satir: 'Kategori: k1,k2,k3,k4'")
+		return
+	}
+	if err := s.Store.AddConnection(
+		r.Context(), content.ConnectionPuzzle{Groups: groups}); err != nil {
+		redirectMsg(w, r, "Hata: "+err.Error())
+		return
+	}
+	s.Cache.Del(r.Context(), cacheKeyBundle)
+	redirectMsg(w, r, "Bağlantı bulmacası eklendi")
+}
+
+func (s *Server) adminDeleteConnection(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err := s.Store.DeleteConnection(r.Context(), id); err != nil {
+		redirectMsg(w, r, "Hata: "+err.Error())
+		return
+	}
+	s.Cache.Del(r.Context(), cacheKeyBundle)
+	redirectMsg(w, r, "Silindi")
 }
 
 func (s *Server) adminImportQuestions(w http.ResponseWriter, r *http.Request) {
@@ -791,7 +852,7 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
  .lists>.card{flex:1;min-width:300px;margin:0}
 </style></head><body>
 <h1>Bulbi Admin</h1>
-<p class="muted">İçerik sürümü: {{.Version}} · Kelime: {{.WordsTotal}} · Soru: {{.QuestionsTotal}}</p>
+<p class="muted">İçerik sürümü: {{.Version}} · Kelime: {{.WordsTotal}} · Soru: {{.QuestionsTotal}} · Bağlantı: {{.ConnectionsTotal}}</p>
 {{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
 
 {{if .PushEnabled}}
@@ -848,6 +909,21 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
    <div class="muted">Sütunlar: Soru | Seçenek1 | Seçenek2 | Seçenek3 | Seçenek4 | Doğru(1-4) | Tür | Zorluk</div>
   </form>
  </div>
+</div>
+
+<div class="card">
+ <h2>🔗 Bağlantı bulmacası ekle ({{.ConnectionsTotal}})</h2>
+ <form method="post" action="/admin/connections">
+  <div class="muted">4 satır — her satır bir grup: <b>Kategori: k1,k2,k3,k4</b></div>
+  <textarea name="groups" rows="5" required style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #ccd;border-radius:8px;margin:6px 0;font-size:14px" placeholder="Meyveler: ELMA,ARMUT,KİRAZ,ÜZÜM&#10;Gezegenler: MARS,VENÜS,DÜNYA,JÜPİTER&#10;..."></textarea>
+  <button type="submit">Ekle</button>
+ </form>
+ {{range .Connections}}
+ <div class="sub">
+  {{range .Groups}}<b>{{.Category}}:</b> {{range .Words}}{{.}} {{end}}<br>{{end}}
+  <form method="post" action="/admin/connections/delete" onsubmit="return confirm('Silinsin mi?')" style="margin-top:6px"><input type="hidden" name="id" value="{{.ID}}"><button class="del" type="submit">Sil</button></form>
+ </div>
+ {{end}}
 </div>
 
 <div class="lists">

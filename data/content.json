@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "words": [
     "ARABA", "KİTAP", "KALEM", "BAHÇE", "ELMAS", "ÇİÇEK", "KÖPEK", "BALIK",
     "GÜNEŞ", "DENİZ", "ORMAN", "ŞEHİR", "KÖPRÜ", "BULUT", "ÇİMEN", "MEYVE",
@@ -66,5 +66,43 @@
     {"q": "Hamlet adlı eser kime aittir?", "options": ["Shakespeare", "Tolstoy", "Dostoyevski", "Goethe"], "answer": 0, "category": "sanat", "difficulty": "orta"},
     {"q": "Nobel Edebiyat Ödülü alan ilk Türk yazar kimdir?", "options": ["Yaşar Kemal", "Orhan Pamuk", "Nâzım Hikmet", "Sabahattin Ali"], "answer": 1, "category": "sanat", "difficulty": "zor"},
     {"q": "Mona Lisa hangi müzede sergilenmektedir?", "options": ["Louvre", "Prado", "Uffizi", "British Museum"], "answer": 0, "category": "sanat", "difficulty": "zor"}
+  ],
+  "connections": [
+    {"groups": [
+      {"category": "Meyveler", "words": ["ELMA", "ARMUT", "KİRAZ", "ÜZÜM"], "level": 0},
+      {"category": "Renkler", "words": ["KIRMIZI", "MAVİ", "YEŞİL", "SARI"], "level": 1},
+      {"category": "Gezegenler", "words": ["MARS", "VENÜS", "DÜNYA", "SATÜRN"], "level": 2},
+      {"category": "Mevsimler", "words": ["KIŞ", "YAZ", "BAHAR", "GÜZ"], "level": 3}
+    ]},
+    {"groups": [
+      {"category": "Şehirler", "words": ["ANKARA", "İZMİR", "BURSA", "KONYA"], "level": 0},
+      {"category": "Hayvanlar", "words": ["ASLAN", "KAPLAN", "ZEBRA", "FİL"], "level": 1},
+      {"category": "Sporlar", "words": ["FUTBOL", "BASKET", "TENİS", "GÜREŞ"], "level": 2},
+      {"category": "Çalgılar", "words": ["GİTAR", "PİYANO", "KEMAN", "DAVUL"], "level": 3}
+    ]},
+    {"groups": [
+      {"category": "Organlar", "words": ["KALP", "BEYİN", "CİĞER", "BÖBREK"], "level": 0},
+      {"category": "İçecekler", "words": ["ÇAY", "KAHVE", "AYRAN", "SU"], "level": 1},
+      {"category": "Deniz canlıları", "words": ["AHTAPOT", "YENGEÇ", "MİDYE", "KALKAN"], "level": 2},
+      {"category": "Çiçekler", "words": ["GÜL", "LALE", "PAPATYA", "MENEKŞE"], "level": 3}
+    ]},
+    {"groups": [
+      {"category": "Sayılar", "words": ["BİR", "İKİ", "ÜÇ", "DÖRT"], "level": 0},
+      {"category": "Kıtalar", "words": ["ASYA", "AVRUPA", "AFRİKA", "AMERİKA"], "level": 1},
+      {"category": "Yönler", "words": ["KUZEY", "GÜNEY", "DOĞU", "BATI"], "level": 2},
+      {"category": "Madenler", "words": ["ALTIN", "GÜMÜŞ", "DEMİR", "BAKIR"], "level": 3}
+    ]},
+    {"groups": [
+      {"category": "Sebzeler", "words": ["DOMATES", "BİBER", "PATLICAN", "KABAK"], "level": 0},
+      {"category": "Gökyüzü", "words": ["GÜNEŞ", "AY", "YILDIZ", "BULUT"], "level": 1},
+      {"category": "Aile", "words": ["ANNE", "BABA", "KARDEŞ", "TEYZE"], "level": 2},
+      {"category": "Ulaşım", "words": ["OTOBÜS", "TREN", "UÇAK", "VAPUR"], "level": 3}
+    ]},
+    {"groups": [
+      {"category": "Tatlılar", "words": ["BAKLAVA", "KÜNEFE", "SÜTLAÇ", "REVANİ"], "level": 0},
+      {"category": "Takılar", "words": ["YÜZÜK", "KOLYE", "BİLEZİK", "KÜPE"], "level": 1},
+      {"category": "Mutfak", "words": ["TABAK", "ÇATAL", "KAŞIK", "BIÇAK"], "level": 2},
+      {"category": "Giysiler", "words": ["GÖMLEK", "ETEK", "CEKET", "ŞAPKA"], "level": 3}
+    ]}
   ]
 }
