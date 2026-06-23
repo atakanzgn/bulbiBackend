@@ -75,6 +75,40 @@ func TestLeaderboardOrderAndRank(t *testing.T) {
 	}
 }
 
+func TestWeeklyLeaderboardSumsWindow(t *testing.T) {
+	s, ctx := newTestStore(t)
+	// Hafta penceresi 4..10; 'daily' skorlari.
+	_ = s.SubmitScore(ctx, "a", "Ayşe", "daily", 8, 2)
+	_ = s.SubmitScore(ctx, "a", "Ayşe", "daily", 9, 3)
+	_ = s.SubmitScore(ctx, "a", "Ayşe", "daily", 10, 1) // toplam 6
+	_ = s.SubmitScore(ctx, "b", "Veli", "daily", 10, 5) // toplam 5
+	// Pencere disindaki gun sayilmamali.
+	_ = s.SubmitScore(ctx, "b", "Veli", "daily", 3, 100)
+
+	top, err := s.LeaderboardWeekly(ctx, "daily", 4, 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("2 kayit bekleniyordu, %d", len(top))
+	}
+	if top[0].Name != "Ayşe" || top[0].Score != 6 || top[0].Rank != 1 {
+		t.Errorf("ilk sira Ayşe 6 olmali: %+v", top[0])
+	}
+	if top[1].Name != "Veli" || top[1].Score != 5 {
+		t.Errorf("ikinci sira Veli 5 olmali: %+v", top[1])
+	}
+
+	rank, score, found, _ := s.MyRankWeekly(ctx, "daily", 4, 10, "b")
+	if !found || score != 5 || rank != 2 {
+		t.Errorf("Veli haftalik rank=2 score=5 olmali, rank=%d score=%d found=%v", rank, score, found)
+	}
+
+	if _, _, found2, _ := s.MyRankWeekly(ctx, "daily", 4, 10, "zzz"); found2 {
+		t.Error("skoru olmayan cihaz found=false olmali")
+	}
+}
+
 func TestDeviceTokens(t *testing.T) {
 	s, ctx := newTestStore(t)
 	if err := s.SaveDevice(ctx, "dev1", "tokenA", "android"); err != nil {

@@ -151,6 +151,63 @@ func (s *Store) MyRank(ctx context.Context, puzzle string, day int, deviceID str
 	return rank, score, true, nil
 }
 
+// LeaderboardWeekly [dayStart..dayEnd] penceresinde cihaz basina toplam skoru
+// (gunluk skorlarin toplami) en yuksekten dusuge dondurur. Ad, penceredeki en
+// guncel gunden alinir.
+func (s *Store) LeaderboardWeekly(ctx context.Context, puzzle string, dayStart, dayEnd, limit int) ([]Entry, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT (array_agg(name ORDER BY day DESC))[1] AS name, SUM(score)::int AS total
+FROM scores
+WHERE puzzle = $1 AND day BETWEEN $2 AND $3
+GROUP BY device_id
+ORDER BY total DESC, MAX(updated_at) ASC
+LIMIT $4`, puzzle, dayStart, dayEnd, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []Entry{}
+	rank := 0
+	for rows.Next() {
+		rank++
+		var e Entry
+		if err := rows.Scan(&e.Name, &e.Score); err != nil {
+			return nil, err
+		}
+		e.Rank = rank
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MyRankWeekly bir cihazin [dayStart..dayEnd] penceresindeki toplam skorunu ve
+// sirasini dondurur. Pencerede hic skoru yoksa found=false.
+func (s *Store) MyRankWeekly(ctx context.Context, puzzle string, dayStart, dayEnd int, deviceID string) (rank, score int, found bool, err error) {
+	var cnt int
+	err = s.pool.QueryRow(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(score), 0)::int FROM scores
+		 WHERE device_id=$1 AND puzzle=$2 AND day BETWEEN $3 AND $4`,
+		deviceID, puzzle, dayStart, dayEnd).Scan(&cnt, &score)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if cnt == 0 {
+		return 0, 0, false, nil
+	}
+	err = s.pool.QueryRow(ctx, `
+SELECT COUNT(*)+1 FROM (
+  SELECT device_id, SUM(score) AS total
+  FROM scores WHERE puzzle=$1 AND day BETWEEN $2 AND $3
+  GROUP BY device_id
+) t WHERE t.total > $4`,
+		puzzle, dayStart, dayEnd, score).Scan(&rank)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return rank, score, true, nil
+}
+
 // SaveDevice push icin cihaz token'ini kaydeder/gunceller.
 func (s *Store) SaveDevice(ctx context.Context, deviceID, token, platform string) error {
 	_, err := s.pool.Exec(ctx, `

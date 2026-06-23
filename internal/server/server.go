@@ -207,15 +207,36 @@ func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	top, err := s.Store.Leaderboard(r.Context(), puzzle, day, limit)
+	// period=weekly -> son 7 gunun (gun-6..gun) gunluk skorlarinin toplami.
+	weekly := q.Get("period") == "weekly"
+	weekStart := day - 6
+	if weekStart < 1 {
+		weekStart = 1
+	}
+
+	var top []store.Entry
+	if weekly {
+		top, err = s.Store.LeaderboardWeekly(r.Context(), puzzle, weekStart, day, limit)
+	} else {
+		top, err = s.Store.Leaderboard(r.Context(), puzzle, day, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "liderlik alinamadi")
 		return
 	}
 	resp := map[string]any{"top": top}
 	if deviceID := q.Get("deviceId"); deviceID != "" {
-		rank, score, found, err := s.Store.MyRank(r.Context(), puzzle, day, deviceID)
-		if err == nil && found {
+		var (
+			rank, score int
+			found       bool
+			merr        error
+		)
+		if weekly {
+			rank, score, found, merr = s.Store.MyRankWeekly(r.Context(), puzzle, weekStart, day, deviceID)
+		} else {
+			rank, score, found, merr = s.Store.MyRank(r.Context(), puzzle, day, deviceID)
+		}
+		if merr == nil && found {
 			resp["me"] = map[string]int{"rank": rank, "score": score}
 		}
 	}
