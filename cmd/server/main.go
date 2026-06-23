@@ -15,6 +15,7 @@ import (
 
 	"bulbi-backend/internal/cache"
 	"bulbi-backend/internal/content"
+	"bulbi-backend/internal/iap"
 	"bulbi-backend/internal/push"
 	"bulbi-backend/internal/server"
 	"bulbi-backend/internal/store"
@@ -94,6 +95,31 @@ func main() {
 		log.Println("push: devre disi (FCM_CREDENTIALS tanimli degil)")
 	}
 
+	// IAP (opsiyonel): satin alma makbuzu dogrulama. Apple paylasilan sirri
+	// ve/veya Play servis hesabi verilirse ilgili platform etkinlesir.
+	var verifier *iap.Verifier
+	{
+		appleSecret := os.Getenv("APPSTORE_SHARED_SECRET")
+		var playSA []byte
+		if p := os.Getenv("PLAY_SERVICE_ACCOUNT"); p != "" {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				log.Fatalf("Play servis hesabi okunamadi: %v", err)
+			}
+			playSA = b
+		}
+		if appleSecret != "" || len(playSA) > 0 {
+			v, err := iap.New(appleSecret, playSA, os.Getenv("ANDROID_PACKAGE_NAME"))
+			if err != nil {
+				log.Fatalf("IAP dogrulayici olusturulamadi: %v", err)
+			}
+			verifier = v
+			log.Println("iap: etkin")
+		} else {
+			log.Println("iap: devre disi (APPSTORE_SHARED_SECRET / PLAY_SERVICE_ACCOUNT yok)")
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -118,6 +144,7 @@ func main() {
 		Store:           st,
 		Cache:           rc,
 		Push:            sender,
+		IAP:             verifier,
 		AdminPassword:   os.Getenv("ADMIN_PASSWORD"),
 		RateLimitPerMin: envInt("RATE_LIMIT_PER_MIN", 120),
 		MinAppBuild:     envInt("MIN_APP_BUILD", 1),

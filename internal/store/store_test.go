@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 )
@@ -106,6 +107,49 @@ func TestWeeklyLeaderboardSumsWindow(t *testing.T) {
 
 	if _, _, found2, _ := s.MyRankWeekly(ctx, "daily", 4, 10, "zzz"); found2 {
 		t.Error("skoru olmayan cihaz found=false olmali")
+	}
+}
+
+func TestLeagueCreateJoinBoard(t *testing.T) {
+	s, ctx := newTestStore(t)
+
+	lg, err := s.CreateLeague(ctx, "owner", "Ben", "Dostlar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lg.Code == "" || lg.ID == 0 || lg.Name != "Dostlar" {
+		t.Fatalf("gecersiz lig: %+v", lg)
+	}
+
+	if _, err := s.JoinLeague(ctx, "friend", "Mehmet", lg.Code); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.JoinLeague(ctx, "x", "X", "BULBI-ZZZZ"); !errors.Is(err, ErrLeagueNotFound) {
+		t.Errorf("gecersiz kod ErrLeagueNotFound vermeli, %v", err)
+	}
+
+	// Haftalik 'daily' skorlar (lig disindaki cihaz sayilmamali).
+	_ = s.SubmitScore(ctx, "owner", "Ben", "daily", 10, 5)
+	_ = s.SubmitScore(ctx, "friend", "Mehmet", "daily", 10, 8)
+	_ = s.SubmitScore(ctx, "stranger", "Yabanci", "daily", 10, 99)
+
+	board, err := s.LeagueBoard(ctx, lg.Code, 4, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(board) != 2 {
+		t.Fatalf("2 uye bekleniyordu, %d", len(board))
+	}
+	if board[0].Name != "Mehmet" || board[0].Score != 8 || board[0].Rank != 1 {
+		t.Errorf("ilk sira Mehmet 8 olmali: %+v", board[0])
+	}
+
+	mine, err := s.MyLeagues(ctx, "friend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 1 || mine[0].Code != lg.Code {
+		t.Errorf("friend tam 1 ligde olmali: %+v", mine)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -23,6 +24,7 @@ import (
 
 	"bulbi-backend/internal/cache"
 	"bulbi-backend/internal/content"
+	"bulbi-backend/internal/iap"
 	"bulbi-backend/internal/push"
 	"bulbi-backend/internal/store"
 
@@ -33,6 +35,7 @@ type Server struct {
 	Store           *store.Store
 	Cache           *cache.Cache
 	Push            *push.Sender
+	IAP             *iap.Verifier // nil ise IAP dogrulama kapali
 	AdminPassword   string // bos ise admin paneli kapali
 	RateLimitPerMin int    // 0 -> 120
 	MinAppBuild     int    // istemcinin gerektirdigi minimum build numarasi
@@ -67,6 +70,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/app", s.getAppInfo)
 	mux.HandleFunc("POST /api/v1/scores", s.postScore)
 	mux.HandleFunc("GET /api/v1/leaderboard", s.getLeaderboard)
+	mux.HandleFunc("POST /api/v1/leagues", s.postLeague)
+	mux.HandleFunc("POST /api/v1/leagues/join", s.postLeagueJoin)
+	mux.HandleFunc("GET /api/v1/leagues", s.getMyLeagues)
+	mux.HandleFunc("GET /api/v1/leagues/board", s.getLeagueBoard)
+	mux.HandleFunc("POST /api/v1/iap/verify", s.postIAPVerify)
 	mux.HandleFunc("POST /api/v1/devices", s.postDevice)
 	mux.HandleFunc("POST /api/v1/devices/delete", s.postDeviceDelete)
 
@@ -241,6 +249,189 @@ func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// clampName adi temizler: bos ise "Anonim", en fazla 24 karakter.
+func clampName(s string) string {
+	n := strings.TrimSpace(s)
+	if n == "" {
+		n = "Anonim"
+	}
+	if len(n) > 24 {
+		n = n[:24]
+	}
+	return n
+}
+
+func (s *Server) postLeague(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID   string `json:"deviceId"`
+		Name       string `json:"name"`       // sahibin gorunen adi
+		LeagueName string `json:"leagueName"` // ligin adi
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "deviceId gerekli")
+		return
+	}
+	leagueName := strings.TrimSpace(req.LeagueName)
+	if leagueName == "" {
+		leagueName = "Arkadaş Ligi"
+	}
+	if len(leagueName) > 30 {
+		leagueName = leagueName[:30]
+	}
+	lg, err := s.Store.CreateLeague(r.Context(), req.DeviceID, clampName(req.Name), leagueName)
+	if err != nil {
+		log.Printf("lig olusturma hatasi: %v", err)
+		writeError(w, http.StatusInternalServerError, "lig olusturulamadi")
+		return
+	}
+	writeJSON(w, http.StatusOK, lg)
+}
+
+func (s *Server) postLeagueJoin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID string `json:"deviceId"`
+		Name     string `json:"name"`
+		Code     string `json:"code"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	if req.DeviceID == "" || code == "" {
+		writeError(w, http.StatusBadRequest, "deviceId ve code gerekli")
+		return
+	}
+	lg, err := s.Store.JoinLeague(r.Context(), req.DeviceID, clampName(req.Name), code)
+	if errors.Is(err, store.ErrLeagueNotFound) {
+		writeError(w, http.StatusNotFound, "lig bulunamadi")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "lige katilinamadi")
+		return
+	}
+	writeJSON(w, http.StatusOK, lg)
+}
+
+func (s *Server) getMyLeagues(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.URL.Query().Get("deviceId")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "deviceId gerekli")
+		return
+	}
+	leagues, err := s.Store.MyLeagues(r.Context(), deviceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ligler alinamadi")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"leagues": leagues})
+}
+
+func (s *Server) getLeagueBoard(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	code := strings.ToUpper(strings.TrimSpace(q.Get("code")))
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "code gerekli")
+		return
+	}
+	day, err := strconv.Atoi(q.Get("day"))
+	if err != nil || day <= 0 {
+		writeError(w, http.StatusBadRequest, "gecersiz day")
+		return
+	}
+	start := day - 6
+	if start < 1 {
+		start = 1
+	}
+	top, err := s.Store.LeagueBoard(r.Context(), code, start, day)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "lig tablosu alinamadi")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"top": top})
+}
+
+// productCoins SUNUCU TARAFLI urun katalogu: istemcinin gonderdigi coin
+// miktarina ASLA guvenilmez; coin yalnizca buradaki esleme kadar verilir.
+var productCoins = map[string]int{
+	"coins_100":  100,
+	"coins_500":  550,  // %10 bonus
+	"coins_1200": 1400, // ~%17 bonus
+}
+
+func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID  string `json:"deviceId"`
+		Platform  string `json:"platform"`  // "ios" | "android"
+		ProductID string `json:"productId"`
+		Receipt   string `json:"receipt"` // iOS: base64 makbuz
+		Token     string `json:"token"`   // Android: purchaseToken
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "deviceId gerekli")
+		return
+	}
+	coins, ok := productCoins[req.ProductID]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "gecersiz urun")
+		return
+	}
+	if s.IAP == nil {
+		writeError(w, http.StatusServiceUnavailable, "satin alma dogrulamasi yapilandirilmamis")
+		return
+	}
+
+	var (
+		res iap.Result
+		err error
+	)
+	switch req.Platform {
+	case "ios":
+		res, err = s.IAP.VerifyApple(r.Context(), req.Receipt, req.ProductID)
+	case "android":
+		res, err = s.IAP.VerifyGoogle(r.Context(), req.ProductID, req.Token)
+	default:
+		writeError(w, http.StatusBadRequest, "gecersiz platform")
+		return
+	}
+	if errors.Is(err, iap.ErrNotConfigured) {
+		writeError(w, http.StatusServiceUnavailable, "bu platform icin dogrulama kapali")
+		return
+	}
+	if errors.Is(err, iap.ErrInvalid) {
+		writeError(w, http.StatusBadRequest, "makbuz dogrulanamadi")
+		return
+	}
+	if err != nil {
+		log.Printf("iap dogrulama hatasi: %v", err)
+		writeError(w, http.StatusInternalServerError, "dogrulama hatasi")
+		return
+	}
+
+	// Idempotent: ayni islem kimligi yeniden coin kazandirmaz.
+	fresh, err := s.Store.RecordPurchase(
+		r.Context(), res.TransactionID, req.DeviceID, req.ProductID, req.Platform, coins)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "kayit hatasi")
+		return
+	}
+	granted := coins
+	if !fresh {
+		granted = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"granted":          granted,
+		"coins":            coins,
+		"alreadyProcessed": !fresh,
+	})
 }
 
 type deviceRequest struct {

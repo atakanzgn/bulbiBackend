@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -25,6 +26,16 @@ type Entry struct {
 	Score int    `json:"score"`
 	Rank  int    `json:"rank"`
 }
+
+// League bir arkadas ligi (davet kodlu ozel liderlik).
+type League struct {
+	ID   int64  `json:"id"`
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// ErrLeagueNotFound gecersiz davet kodu icin doner.
+var ErrLeagueNotFound = errors.New("lig bulunamadi")
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS scores (
@@ -66,6 +77,29 @@ var migrations = []string{
 		id         BIGSERIAL PRIMARY KEY,
 		data       JSONB     NOT NULL,
 		created_at BIGINT    NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS leagues (
+		id           BIGSERIAL PRIMARY KEY,
+		code         TEXT      NOT NULL UNIQUE,
+		name         TEXT      NOT NULL,
+		owner_device TEXT      NOT NULL,
+		created_at   BIGINT    NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS league_members (
+		league_id BIGINT NOT NULL REFERENCES leagues(id) ON DELETE CASCADE,
+		device_id TEXT   NOT NULL,
+		name      TEXT   NOT NULL DEFAULT 'Anonim',
+		joined_at BIGINT NOT NULL,
+		PRIMARY KEY (league_id, device_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_league_members_device ON league_members (device_id)`,
+	`CREATE TABLE IF NOT EXISTS purchases (
+		transaction_id TEXT    PRIMARY KEY,
+		device_id      TEXT    NOT NULL,
+		product_id     TEXT    NOT NULL,
+		platform       TEXT    NOT NULL,
+		coins          INTEGER NOT NULL,
+		created_at     BIGINT  NOT NULL
 	)`,
 }
 
@@ -206,6 +240,131 @@ SELECT COUNT(*)+1 FROM (
 		return 0, 0, false, err
 	}
 	return rank, score, true, nil
+}
+
+const _codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // O/0/I/1 yok
+
+func genLeagueCode() string {
+	b := make([]byte, 4)
+	for i := range b {
+		b[i] = _codeAlphabet[rand.Intn(len(_codeAlphabet))]
+	}
+	return "BULBI-" + string(b)
+}
+
+// CreateLeague benzersiz kodlu bir lig olusturur ve sahibini ([playerName] ile)
+// uye yapar. [leagueName] ligin adi, [playerName] sahibin gorunen adidir.
+func (s *Store) CreateLeague(ctx context.Context, deviceID, playerName, leagueName string) (League, error) {
+	now := time.Now().Unix()
+	for attempt := 0; attempt < 8; attempt++ {
+		code := genLeagueCode()
+		var id int64
+		err := s.pool.QueryRow(ctx,
+			`INSERT INTO leagues (code, name, owner_device, created_at)
+			 VALUES ($1,$2,$3,$4) ON CONFLICT (code) DO NOTHING RETURNING id`,
+			code, leagueName, deviceID, now).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // kod carpismasi -> yeniden dene
+		}
+		if err != nil {
+			return League{}, err
+		}
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO league_members (league_id, device_id, name, joined_at)
+			 VALUES ($1,$2,$3,$4)
+			 ON CONFLICT (league_id, device_id) DO UPDATE SET name=EXCLUDED.name`,
+			id, deviceID, playerName, now); err != nil {
+			return League{}, err
+		}
+		return League{ID: id, Code: code, Name: leagueName}, nil
+	}
+	return League{}, errors.New("benzersiz kod uretilemedi")
+}
+
+// JoinLeague koda gore cihazi lige katar (varsa adini gunceller).
+func (s *Store) JoinLeague(ctx context.Context, deviceID, name, code string) (League, error) {
+	var lg League
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, code, name FROM leagues WHERE code=$1`, code).
+		Scan(&lg.ID, &lg.Code, &lg.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return League{}, ErrLeagueNotFound
+	}
+	if err != nil {
+		return League{}, err
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO league_members (league_id, device_id, name, joined_at)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (league_id, device_id) DO UPDATE SET name=EXCLUDED.name`,
+		lg.ID, deviceID, name, time.Now().Unix()); err != nil {
+		return League{}, err
+	}
+	return lg, nil
+}
+
+// MyLeagues cihazin uye oldugu ligleri dondurur.
+func (s *Store) MyLeagues(ctx context.Context, deviceID string) ([]League, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT l.id, l.code, l.name FROM leagues l
+		 JOIN league_members m ON m.league_id = l.id
+		 WHERE m.device_id = $1 ORDER BY m.joined_at DESC`, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []League{}
+	for rows.Next() {
+		var l League
+		if err := rows.Scan(&l.ID, &l.Code, &l.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// LeagueBoard lig uyelerini [dayStart..dayEnd] penceresindeki haftalik 'daily'
+// skor toplamina gore siralar. Lig yoksa bos liste doner.
+func (s *Store) LeagueBoard(ctx context.Context, code string, dayStart, dayEnd int) ([]Entry, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT m.name, COALESCE(SUM(s.score), 0)::int AS total
+FROM league_members m
+JOIN leagues l ON l.id = m.league_id
+LEFT JOIN scores s ON s.device_id = m.device_id
+  AND s.puzzle = 'daily' AND s.day BETWEEN $2 AND $3
+WHERE l.code = $1
+GROUP BY m.device_id, m.name
+ORDER BY total DESC, m.name ASC`, code, dayStart, dayEnd)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Entry{}
+	rank := 0
+	for rows.Next() {
+		rank++
+		var e Entry
+		if err := rows.Scan(&e.Name, &e.Score); err != nil {
+			return nil, err
+		}
+		e.Rank = rank
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// RecordPurchase satin almayi idempotent kaydeder: ilk kez isleniyorsa true,
+// daha once islenmisse false doner (coin TEKRAR verilmemeli).
+func (s *Store) RecordPurchase(ctx context.Context, txnID, deviceID, productID, platform string, coins int) (bool, error) {
+	ct, err := s.pool.Exec(ctx,
+		`INSERT INTO purchases (transaction_id, device_id, product_id, platform, coins, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (transaction_id) DO NOTHING`,
+		txnID, deviceID, productID, platform, coins, time.Now().Unix())
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() > 0, nil
 }
 
 // SaveDevice push icin cihaz token'ini kaydeder/gunceller.
