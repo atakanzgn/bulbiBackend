@@ -48,7 +48,7 @@ APPSTORE_SHARED_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # Android (Play Developer API servis hesabı JSON dosya yolu)
 PLAY_SERVICE_ACCOUNT=/run/secrets/play-sa.json
-ANDROID_PACKAGE_NAME=com.bulbi.app   # uygulamanın paket adı
+ANDROID_PACKAGE_NAME=com.atakanzgn.bulbi   # uygulamanın paket adı
 ```
 
 - En az biri verilirse IAP etkinleşir; verilmeyen platform `ErrNotConfigured`

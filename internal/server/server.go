@@ -407,6 +407,8 @@ func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, iap.ErrInvalid) {
+		log.Printf("iap reddedildi: platform=%s product=%s device=%s: %v",
+			req.Platform, req.ProductID, req.DeviceID, err)
 		writeError(w, http.StatusBadRequest, "makbuz dogrulanamadi")
 		return
 	}

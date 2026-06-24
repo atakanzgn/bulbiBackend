@@ -105,7 +105,7 @@ func (v *Verifier) VerifyApple(ctx context.Context, receipt, productID string) (
 		}
 	}
 	if res.Status != 0 {
-		return Result{}, ErrInvalid
+		return Result{}, fmt.Errorf("%w (apple status %d)", ErrInvalid, res.Status)
 	}
 	var txn string
 	for _, it := range res.Receipt.InApp {
@@ -114,7 +114,7 @@ func (v *Verifier) VerifyApple(ctx context.Context, receipt, productID string) (
 		}
 	}
 	if txn == "" {
-		return Result{}, ErrInvalid
+		return Result{}, fmt.Errorf("%w (urun makbuzda bulunamadi: %s)", ErrInvalid, productID)
 	}
 	return Result{TransactionID: txn}, nil
 }
@@ -162,7 +162,7 @@ func (v *Verifier) VerifyGoogle(ctx context.Context, productID, token string) (R
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Result{}, ErrInvalid
+		return Result{}, fmt.Errorf("%w (play http %d)", ErrInvalid, resp.StatusCode)
 	}
 	var pr struct {
 		PurchaseState *int   `json:"purchaseState"`
@@ -172,7 +172,7 @@ func (v *Verifier) VerifyGoogle(ctx context.Context, productID, token string) (R
 		return Result{}, err
 	}
 	if pr.PurchaseState == nil || *pr.PurchaseState != 0 { // 0 = Purchased
-		return Result{}, ErrInvalid
+		return Result{}, fmt.Errorf("%w (play purchaseState=%v)", ErrInvalid, pr.PurchaseState)
 	}
 	txn := pr.OrderID
 	if txn == "" {
