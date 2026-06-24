@@ -95,11 +95,10 @@ func main() {
 		log.Println("push: devre disi (FCM_CREDENTIALS tanimli degil)")
 	}
 
-	// IAP (opsiyonel): satin alma makbuzu dogrulama. Apple paylasilan sirri
-	// ve/veya Play servis hesabi verilirse ilgili platform etkinlesir.
+	// IAP dogrulayici: iOS StoreKit 2 (JWS imza, gomulu Apple Root CA G3 ile her
+	// zaman acik) + opsiyonel Android (PLAY_SERVICE_ACCOUNT verilirse).
 	var verifier *iap.Verifier
 	{
-		appleSecret := os.Getenv("APPSTORE_SHARED_SECRET")
 		var playSA []byte
 		if p := os.Getenv("PLAY_SERVICE_ACCOUNT"); p != "" {
 			b, err := os.ReadFile(p)
@@ -108,15 +107,15 @@ func main() {
 			}
 			playSA = b
 		}
-		if appleSecret != "" || len(playSA) > 0 {
-			v, err := iap.New(appleSecret, playSA, os.Getenv("ANDROID_PACKAGE_NAME"))
-			if err != nil {
-				log.Fatalf("IAP dogrulayici olusturulamadi: %v", err)
-			}
-			verifier = v
-			log.Println("iap: etkin")
+		v, err := iap.New(os.Getenv("IOS_BUNDLE_ID"), playSA, os.Getenv("ANDROID_PACKAGE_NAME"))
+		if err != nil {
+			log.Fatalf("IAP dogrulayici olusturulamadi: %v", err)
+		}
+		verifier = v
+		if len(playSA) > 0 {
+			log.Println("iap: iOS(StoreKit2) + Android etkin")
 		} else {
-			log.Println("iap: devre disi (APPSTORE_SHARED_SECRET / PLAY_SERVICE_ACCOUNT yok)")
+			log.Println("iap: iOS(StoreKit2) etkin; Android kapali (PLAY_SERVICE_ACCOUNT yok)")
 		}
 	}
 

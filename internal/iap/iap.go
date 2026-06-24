@@ -43,9 +43,10 @@ type serviceAccount struct {
 	TokenURI    string `json:"token_uri"`
 }
 
-// Verifier App Store + Play dogrulayicisi.
+// Verifier App Store (StoreKit 2) + Play dogrulayicisi.
 type Verifier struct {
-	appleSecret    string // App Store paylasilan sirri (verifyReceipt)
+	iosBundleID    string         // beklenen iOS bundle id (bos = kontrol etme)
+	appleRoots     *x509.CertPool // Apple Root CA G3 (JWS guven koku)
 	googleSA       *serviceAccount
 	androidPackage string
 	client         *http.Client
@@ -55,11 +56,17 @@ type Verifier struct {
 	gExpiry time.Time
 }
 
-// New, env'den gelen yapilandirmayla bir Verifier olusturur. Bos alanlar ilgili
-// platformu devre disi birakir (o platform icin ErrNotConfigured doner).
-func New(appleSharedSecret string, googleSAJSON []byte, androidPackage string) (*Verifier, error) {
+// New bir Verifier olusturur. iOS StoreKit 2 dogrulamasi her zaman aciktir
+// (gomulu Apple Root CA G3 ile, ag gerektirmez). Android, [googleSAJSON]
+// verilirse etkinlesir.
+func New(iosBundleID string, googleSAJSON []byte, androidPackage string) (*Verifier, error) {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(appleRootCAG3PEM)) {
+		return nil, errors.New("iap: Apple Root CA G3 yuklenemedi")
+	}
 	v := &Verifier{
-		appleSecret:    appleSharedSecret,
+		iosBundleID:    iosBundleID,
+		appleRoots:     roots,
 		androidPackage: androidPackage,
 		client:         &http.Client{Timeout: 15 * time.Second},
 	}
@@ -76,67 +83,28 @@ func New(appleSharedSecret string, googleSAJSON []byte, androidPackage string) (
 	return v, nil
 }
 
-// --- Apple (legacy verifyReceipt) ---
+// --- Apple (StoreKit 2 JWS, cevrimdisi imza dogrulamasi) ---
 
-type appleResp struct {
-	Status  int `json:"status"`
-	Receipt struct {
-		InApp []struct {
-			ProductID     string `json:"product_id"`
-			TransactionID string `json:"transaction_id"`
-		} `json:"in_app"`
-	} `json:"receipt"`
-}
-
-// VerifyApple base64 makbuzu Apple ile dogrular ve [productID] icin islem
-// kimligini doner. Prod uctan 21007 gelirse sandbox'a duser.
-func (v *Verifier) VerifyApple(ctx context.Context, receipt, productID string) (Result, error) {
-	if v.appleSecret == "" {
-		return Result{}, ErrNotConfigured
-	}
-	res, err := v.appleHit(ctx, "https://buy.itunes.apple.com/verifyReceipt", receipt)
+// VerifyApple istemciden gelen StoreKit 2 imzali islemini (JWS) dogrular ve
+// islem kimligini doner. Apple ile ag gorusmesi gerekmez: imza + sertifika
+// zinciri Apple Root CA G3'e kadar denetlenir. ([ctx] kullanilmaz; imza Google
+// ile tutarli olsun diye korunur.)
+func (v *Verifier) VerifyApple(ctx context.Context, jws, productID string) (Result, error) {
+	_ = ctx
+	p, err := verifyAppleJWS(jws, v.appleRoots)
 	if err != nil {
 		return Result{}, err
 	}
-	if res.Status == 21007 { // sandbox makbuzu prod'a gonderilmis
-		res, err = v.appleHit(ctx, "https://sandbox.itunes.apple.com/verifyReceipt", receipt)
-		if err != nil {
-			return Result{}, err
-		}
+	if v.iosBundleID != "" && p.BundleID != v.iosBundleID {
+		return Result{}, fmt.Errorf("%w (bundle uyusmuyor: %s)", ErrInvalid, p.BundleID)
 	}
-	if res.Status != 0 {
-		return Result{}, fmt.Errorf("%w (apple status %d)", ErrInvalid, res.Status)
+	if p.ProductID != productID {
+		return Result{}, fmt.Errorf("%w (urun uyusmuyor: %s)", ErrInvalid, p.ProductID)
 	}
-	var txn string
-	for _, it := range res.Receipt.InApp {
-		if it.ProductID == productID && it.TransactionID != "" {
-			txn = it.TransactionID
-		}
+	if p.TransactionID == "" {
+		return Result{}, fmt.Errorf("%w (islem kimligi yok)", ErrInvalid)
 	}
-	if txn == "" {
-		return Result{}, fmt.Errorf("%w (urun makbuzda bulunamadi: %s)", ErrInvalid, productID)
-	}
-	return Result{TransactionID: txn}, nil
-}
-
-func (v *Verifier) appleHit(ctx context.Context, endpoint, receipt string) (appleResp, error) {
-	body, _ := json.Marshal(map[string]any{
-		"receipt-data":             receipt,
-		"password":                 v.appleSecret,
-		"exclude-old-transactions": true,
-	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := v.client.Do(req)
-	if err != nil {
-		return appleResp{}, err
-	}
-	defer resp.Body.Close()
-	var out appleResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return appleResp{}, err
-	}
-	return out, nil
+	return Result{TransactionID: p.TransactionID}, nil
 }
 
 // --- Google Play (Developer API) ---

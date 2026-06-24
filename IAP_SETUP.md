@@ -6,15 +6,17 @@ Bu rehber, App Store ve Google Play üzerinden **coin satın almayı** ve bunun
 ## Güvenlik modeli (önemli)
 
 - İstemci bir satın alma yaptığında coin'i **kendisi vermez**. Makbuz/token
-  backend'e gönderilir → backend **Apple/Google ile doğrular** → işlemi
-  **idempotent** kaydeder → istemciye **kaç coin verileceğini** söyler.
+  backend'e gönderilir → backend **doğrular** (iOS: StoreKit 2 JWS imzasını
+  çevrimdışı; Android: Play API) → işlemi **idempotent** kaydeder → istemciye
+  **kaç coin verileceğini** söyler.
 - Coin miktarı **sunucudaki katalogda** bellidir (`productCoins`,
   `internal/server/server.go`). İstemci miktar gönderemez/değiştiremez.
 - Aynı işlem (`transaction_id`) **iki kez coin kazandırmaz** (`purchases` tablosu,
   `ON CONFLICT DO NOTHING`).
-- **Güvenli varsayılan:** İlgili platform için doğrulama yapılandırılmamışsa
-  (paylaşılan sır / servis hesabı yoksa) istek **reddedilir** (503), coin
-  verilmez. Yani yanlışlıkla "doğrulamasız coin" mümkün değildir.
+- **iOS doğrulaması her zaman açıktır:** gömülü **Apple Root CA G3** ile JWS
+  imzası ve sertifika zinciri çevrimdışı denetlenir (Apple'a ağ isteği / gizli
+  anahtar gerekmez). **Android**, servis hesabı yoksa **reddedilir** (503). Yani
+  yanlışlıkla "doğrulamasız coin" mümkün değildir.
 
 > Not: Oyun-içi kazanılan (ücretsiz) coin'ler istemci tarafında tutulur — bunlar
 > tek-oyunculu ve düşük riskli. Sunucu doğrulaması yalnızca **parayla alınan**
@@ -43,28 +45,25 @@ Console'da **birebir aynı** kimlikle oluştur:
 `internal/server` IAP doğrulamasını şu env'lerle açar (hiçbiri yoksa IAP kapalı):
 
 ```
-# iOS (App Store paylaşılan sırrı — App Store Connect > App > App-Specific Shared Secret)
-APPSTORE_SHARED_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# iOS — gizli anahtar/secret GEREKMEZ. (İsteğe bağlı ama önerilir) bundle id pinle:
+IOS_BUNDLE_ID=com.atakanzgn.bulbi
 
 # Android (Play Developer API servis hesabı JSON dosya yolu)
 PLAY_SERVICE_ACCOUNT=/run/secrets/play-sa.json
 ANDROID_PACKAGE_NAME=com.atakanzgn.bulbi   # uygulamanın paket adı
 ```
 
-- En az biri verilirse IAP etkinleşir; verilmeyen platform `ErrNotConfigured`
-  ile reddedilir.
-- Secret/JSON dosyalarını **repoya koyma** (zaten `*service-account*.json`
-  gitignore'da). FCM JSON'unu mount ettiğin yöntemle (Docker secret/volume) aynı
-  şekilde mount et.
+- **iOS her zaman açık** (gömülü Apple Root CA G3). `IOS_BUNDLE_ID` verirsen
+  makbuzdaki bundle id de denetlenir — başka uygulamanın makbuzu kabul edilmez.
+- **Android**, `PLAY_SERVICE_ACCOUNT` yoksa `ErrNotConfigured` ile reddedilir.
+- Servis hesabı JSON'unu **repoya koyma** (zaten gitignore'da). FCM JSON'unu
+  mount ettiğin yöntemle (Docker secret/volume) aynı şekilde mount et.
 
-### iOS paylaşılan sırrı
-App Store Connect → **Users and Access → Integrations → In-App Purchase** (veya
-App → App Information) → **App-Specific Shared Secret** üret → `APPSTORE_SHARED_SECRET`.
-
-> Bu rehber **legacy `verifyReceipt`** uç noktasını kullanır (basit, paylaşılan
-> sır yeterli, sandbox'a otomatik düşer). Apple bunu uzun vadede App Store Server
-> API (StoreKit 2, JWS) lehine bırakıyor; ileride geçmek istersen `internal/iap`
-> içindeki `VerifyApple`'ı değiştirebilirsin.
+### iOS (StoreKit 2 — anahtar/ağ gerekmez)
+Uygulama StoreKit 2 kullanır; satın almada **imzalı bir JWS** gönderir. Backend
+bunu **çevrimdışı** doğrular: `internal/iap/storekit2.go` içindeki gömülü **Apple
+Root CA G3** ile sertifika zincirini ve **ES256** imzasını denetler. Apple'a istek
+atılmaz, paylaşılan sır gerekmez (`APPSTORE_SHARED_SECRET` **artık kullanılmıyor**).
 
 ### Android servis hesabı
 1. Play Console → **Setup → API access** → bir Google Cloud projesi bağla.
@@ -93,7 +92,7 @@ Kullanıcı "Satın al" → mağaza ödeme alır
   → in_app_purchase purchaseStream(purchased)
     → ApiClient.verifyPurchase(platform, productId, receipt/token)
       → POST /api/v1/iap/verify
-        → iOS: verifyReceipt | Android: Play products.get  (gerçek doğrulama)
+        → iOS: StoreKit2 JWS imza/zincir | Android: Play products.get  (doğrulama)
         → purchases tablosuna idempotent kayıt
         → { granted: <coin> }  (tekrar ise granted=0)
     → GameStorage.addCoins(granted) + completePurchase
@@ -102,9 +101,9 @@ Kullanıcı "Satın al" → mağaza ödeme alır
 ## 5) Test kontrol listesi
 
 - [ ] Ürünler her iki mağazada da `coins_100/500/1200` kimliğiyle **onaylı**.
-- [ ] Backend env'leri ayarlı; loglarda `iap: etkin` görünüyor.
+- [ ] Loglarda `iap: iOS(StoreKit2) ...` görünüyor.
 - [ ] Sandbox/internal-test satın alma → coin geliyor.
 - [ ] Aynı satın almayı tekrar doğrulatınca **coin tekrar gelmiyor** (idempotent).
-- [ ] Geçersiz/sahte makbuz → coin **gelmiyor** (400).
-- [ ] Env'siz sunucu → istek **503**, coin yok (güvenli varsayılan).
+- [ ] Geçersiz/sahte JWS → coin **gelmiyor** (400).
+- [ ] (Android) servis hesabı yoksa → istek **503**, coin yok.
 ```
