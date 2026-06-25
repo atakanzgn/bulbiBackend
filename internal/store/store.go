@@ -399,6 +399,42 @@ func (s *Store) AllTokens(ctx context.Context) ([]string, error) {
 	return tokens, rows.Err()
 }
 
+// DeleteTokens verilen push token'larini siler (olu/kayitsiz token temizligi).
+func (s *Store) DeleteTokens(ctx context.Context, tokens []string) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM devices WHERE token = ANY($1)`, tokens)
+	return err
+}
+
+// StreakReminderTokens, [yesterday] gunu 'daily' oynamis ama [today] gunu
+// oynamamis cihazlarin push token'larini doner (seri-koruma hatirlatmasi icin).
+func (s *Store) StreakReminderTokens(ctx context.Context, yesterday, today int) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT d.token FROM devices d
+WHERE EXISTS (
+    SELECT 1 FROM scores s
+    WHERE s.device_id = d.device_id AND s.puzzle = 'daily' AND s.day = $1)
+  AND NOT EXISTS (
+    SELECT 1 FROM scores s
+    WHERE s.device_id = d.device_id AND s.puzzle = 'daily' AND s.day = $2)`,
+		yesterday, today)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // --- Icerik (kelime + soru) — admin panelinden yonetilir ---
 
 type WordRow struct {
@@ -501,14 +537,20 @@ func (s *Store) ContentBundle(ctx context.Context) (int, []string, []content.Que
 	return version, words, questions, conns, crows.Err()
 }
 
-func (s *Store) AddWord(ctx context.Context, text string) error {
+// AddWord kelimeyi TR büyük harfe çevirip ekler; zaten varsa eklemez. Yeni
+// eklendiyse true döner (tekrar tespiti için).
+func (s *Store) AddWord(ctx context.Context, text string) (bool, error) {
 	t := upperTR(text)
-	if _, err := s.pool.Exec(ctx, `
+	ct, err := s.pool.Exec(ctx, `
 INSERT INTO words (text, length, created_at) VALUES ($1, $2, $3)
-ON CONFLICT (text) DO NOTHING`, t, len([]rune(t)), time.Now().Unix()); err != nil {
-		return err
+ON CONFLICT (text) DO NOTHING`, t, len([]rune(t)), time.Now().Unix())
+	if err != nil {
+		return false, err
 	}
-	return s.bumpVersion(ctx)
+	if ct.RowsAffected() == 0 {
+		return false, nil // zaten vardı
+	}
+	return true, s.bumpVersion(ctx)
 }
 
 // upperTR Turkce kurallarina gore buyuk harfe cevirir (i->İ, ı->I).
@@ -703,9 +745,12 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, max(c.Version, 1)); err
 
 // --- Sayfalama ---
 
-func (s *Store) CountWords(ctx context.Context) (int, error) {
+// CountWords kelime sayısını döner; [search] verilirse (TR büyük) o desene uyanlar.
+func (s *Store) CountWords(ctx context.Context, search string) (int, error) {
 	var n int
-	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM words`).Scan(&n)
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM words WHERE ($1 = '' OR text LIKE '%' || $1 || '%')`,
+		upperTR(search)).Scan(&n)
 	return n, err
 }
 
@@ -715,10 +760,12 @@ func (s *Store) CountQuestions(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (s *Store) ListWordsPaged(ctx context.Context, limit, offset int) ([]WordRow, error) {
+func (s *Store) ListWordsPaged(ctx context.Context, search string, limit, offset int) ([]WordRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, text, length FROM words ORDER BY length, text LIMIT $1 OFFSET $2`,
-		limit, offset)
+		`SELECT id, text, length FROM words
+		 WHERE ($1 = '' OR text LIKE '%' || $1 || '%')
+		 ORDER BY length, text LIMIT $2 OFFSET $3`,
+		upperTR(search), limit, offset)
 	if err != nil {
 		return nil, err
 	}

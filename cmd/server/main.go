@@ -126,11 +126,26 @@ func main() {
 		bc := &push.Broadcaster{
 			Sender: sender,
 			Tokens: st.AllTokens,
+			Prune:  st.DeleteTokens,
 			Hour:   envInt("PUSH_HOUR", 10),
 			Title:  "Bulbi",
 			Body:   "Bugünün bulmacaları hazır! 🧩",
 		}
 		go bc.Run(ctx)
+
+		// Seri-koruma: dün oynamış ama bugün oynamamışlara akşam hatırlatması.
+		streak := &push.Broadcaster{
+			Sender: sender,
+			Tokens: func(c context.Context) ([]string, error) {
+				d := currentDayNumber()
+				return st.StreakReminderTokens(c, d-1, d)
+			},
+			Prune: st.DeleteTokens,
+			Hour:  envInt("STREAK_HOUR", 20),
+			Title: "Bulbi",
+			Body:  "🔥 Serini kaybetme! Bugünkü bulmacaları çöz.",
+		}
+		go streak.Run(ctx)
 	}
 
 	uploadDir := env("UPLOAD_DIR", "data/uploads")
@@ -184,6 +199,15 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// currentDayNumber istemciyle ayni TR (UTC+3) gun numarasini hesaplar.
+// Launch tarihi istemcideki Daily.launchDate ile AYNI olmali (2026-06-16).
+func currentDayNumber() int {
+	launch := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+	tr := time.Now().UTC().Add(3 * time.Hour)
+	today := time.Date(tr.Year(), tr.Month(), tr.Day(), 0, 0, 0, 0, time.UTC)
+	return int(today.Sub(launch).Hours()/24) + 1
 }
 
 func envInt(key string, def int) int {

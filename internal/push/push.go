@@ -100,26 +100,60 @@ func (s *Sender) Send(ctx context.Context, token, title, body, image string) err
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(resp.Body)
+		if tokenIsDead(msg) {
+			return fmt.Errorf("%w (%s)", ErrTokenInvalid, resp.Status)
+		}
 		return fmt.Errorf("fcm gonderim hatasi %s: %s", resp.Status, string(msg))
 	}
 	return nil
 }
 
-// SendToAll tum token'lara ayni bildirimi eszamanli gonderir; basarili sayisini doner.
-func (s *Sender) SendToAll(ctx context.Context, tokens []string, title, body, image string) int {
+// ErrTokenInvalid, FCM token'in artik gecersiz/kayitsiz oldugunu bildirdiginde
+// doner (UNREGISTERED / INVALID_ARGUMENT). Bu token silinmelidir.
+var ErrTokenInvalid = errors.New("token gecersiz/kayitsiz")
+
+// tokenIsDead FCM hata govdesini cozumleyip token'in silinmesi gerekip
+// gerekmedigini soyler.
+func tokenIsDead(body []byte) bool {
+	var e struct {
+		Error struct {
+			Status  string `json:"status"`
+			Details []struct {
+				ErrorCode string `json:"errorCode"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return false
+	}
+	for _, d := range e.Error.Details {
+		if d.ErrorCode == "UNREGISTERED" || d.ErrorCode == "INVALID_ARGUMENT" {
+			return true
+		}
+	}
+	return e.Error.Status == "NOT_FOUND" // 404: token artik yok
+}
+
+// SendToAll tum token'lara ayni bildirimi eszamanli gonderir. Basarili sayisini
+// ve FCM'in "gecersiz/kayitsiz" dedigi (silinmesi gereken) token listesini doner.
+func (s *Sender) SendToAll(ctx context.Context, tokens []string, title, body, image string) (sent int, dead []string) {
 	const workers = 16
 	jobs := make(chan string)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	sent := 0
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for tok := range jobs {
-				if err := s.Send(ctx, tok, title, body, image); err == nil {
+				err := s.Send(ctx, tok, title, body, image)
+				if err == nil {
 					mu.Lock()
 					sent++
+					mu.Unlock()
+				} else if errors.Is(err, ErrTokenInvalid) {
+					mu.Lock()
+					dead = append(dead, tok)
 					mu.Unlock()
 				}
 			}
@@ -130,7 +164,7 @@ func (s *Sender) SendToAll(ctx context.Context, tokens []string, title, body, im
 	}
 	close(jobs)
 	wg.Wait()
-	return sent
+	return sent, dead
 }
 
 // token gecerli bir OAuth2 erisim token'i dondurur (onbellekli).
@@ -224,6 +258,7 @@ func parseKey(pemStr string) (*rsa.PrivateKey, error) {
 type Broadcaster struct {
 	Sender *Sender
 	Tokens func(context.Context) ([]string, error)
+	Prune  func(context.Context, []string) error // olu token temizligi (ops.)
 	Hour   int
 	Title  string
 	Body   string
@@ -253,8 +288,13 @@ func (b *Broadcaster) broadcast(ctx context.Context) {
 		log.Printf("push: token listesi alinamadi: %v", err)
 		return
 	}
-	sent := b.Sender.SendToAll(ctx, tokens, b.Title, b.Body, "")
-	log.Printf("push: %d/%d bildirim gonderildi", sent, len(tokens))
+	sent, dead := b.Sender.SendToAll(ctx, tokens, b.Title, b.Body, "")
+	log.Printf("push: %d/%d bildirim gonderildi (%d olu token)", sent, len(tokens), len(dead))
+	if b.Prune != nil && len(dead) > 0 {
+		if err := b.Prune(ctx, dead); err != nil {
+			log.Printf("push: olu token temizligi hatasi: %v", err)
+		}
+	}
 }
 
 func nextAt(now time.Time, hour int) time.Time {

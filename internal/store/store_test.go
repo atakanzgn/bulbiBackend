@@ -153,6 +153,27 @@ func TestLeagueCreateJoinBoard(t *testing.T) {
 	}
 }
 
+func TestStreakReminderTokens(t *testing.T) {
+	s, ctx := newTestStore(t)
+	_ = s.SaveDevice(ctx, "a", "tokA", "ios") // dün oynadı, bugün yok -> hatırlat
+	_ = s.SaveDevice(ctx, "b", "tokB", "ios") // dün+bugün -> yok
+	_ = s.SaveDevice(ctx, "c", "tokC", "ios") // sadece bugün -> yok
+	_ = s.SaveDevice(ctx, "d", "tokD", "ios") // hiç -> yok
+
+	_ = s.SubmitScore(ctx, "a", "A", "daily", 9, 3)
+	_ = s.SubmitScore(ctx, "b", "B", "daily", 9, 2)
+	_ = s.SubmitScore(ctx, "b", "B", "daily", 10, 4)
+	_ = s.SubmitScore(ctx, "c", "C", "daily", 10, 1)
+
+	toks, err := s.StreakReminderTokens(ctx, 9, 10) // dün=9, bugün=10
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 1 || toks[0] != "tokA" {
+		t.Errorf("yalnız tokA beklenir: %v", toks)
+	}
+}
+
 func TestDeviceTokens(t *testing.T) {
 	s, ctx := newTestStore(t)
 	if err := s.SaveDevice(ctx, "dev1", "tokenA", "android"); err != nil {

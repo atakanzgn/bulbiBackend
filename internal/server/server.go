@@ -25,6 +25,7 @@ import (
 	"bulbi-backend/internal/cache"
 	"bulbi-backend/internal/content"
 	"bulbi-backend/internal/iap"
+	"bulbi-backend/internal/moderation"
 	"bulbi-backend/internal/push"
 	"bulbi-backend/internal/store"
 
@@ -68,6 +69,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/content", s.getContent)
 	mux.HandleFunc("GET /api/v1/content/version", s.getVersion)
 	mux.HandleFunc("GET /api/v1/app", s.getAppInfo)
+	mux.HandleFunc("GET /privacy", s.privacyPage)
+	mux.HandleFunc("GET /gizlilik", s.privacyPage)
 	mux.HandleFunc("POST /api/v1/scores", s.postScore)
 	mux.HandleFunc("GET /api/v1/leaderboard", s.getLeaderboard)
 	mux.HandleFunc("POST /api/v1/leagues", s.postLeague)
@@ -178,13 +181,7 @@ func (s *Server) postScore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "gecersiz istek")
 		return
 	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		name = "Anonim"
-	}
-	if len(name) > 24 {
-		name = name[:24]
-	}
+	name := clampName(req.Name)
 	if err := s.Store.SubmitScore(r.Context(), req.DeviceID, name, req.Puzzle, req.Day, req.Score); err != nil {
 		log.Printf("skor kaydi hatasi: %v", err)
 		writeError(w, http.StatusInternalServerError, "skor kaydedilemedi")
@@ -251,14 +248,93 @@ func (s *Server) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// clampName adi temizler: bos ise "Anonim", en fazla 24 karakter.
+// privacyPage magaza yayini icin gizlilik politikasini HTML olarak sunar.
+// Iletisim adresi PRIVACY_CONTACT env'inden gelir.
+func (s *Server) privacyPage(w http.ResponseWriter, r *http.Request) {
+	contact := os.Getenv("PRIVACY_CONTACT")
+	if contact == "" {
+		contact = "iletisim@bulbi.app" // TODO: gercek e-posta (PRIVACY_CONTACT)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = privacyTmpl.Execute(w, map[string]string{
+		"Contact": contact,
+		"Updated": time.Now().Format("02.01.2006"),
+	})
+}
+
+var privacyTmpl = template.Must(template.New("privacy").Parse(`<!doctype html>
+<html lang="tr"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulbi · Gizlilik Politikası</title>
+<style>
+ body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;
+  margin:0 auto;padding:28px 20px 60px;line-height:1.6;color:#1c1c28;background:#fff}
+ h1{font-size:26px;margin:.2em 0} h2{font-size:18px;margin:1.4em 0 .4em;color:#5B5BE8}
+ .muted{color:#666;font-size:14px} a{color:#5B5BE8}
+ ul{padding-left:20px} li{margin:.25em 0}
+ @media(prefers-color-scheme:dark){body{background:#15151c;color:#e8e8ef}h2{color:#9aa0ff}.muted{color:#9a9aa5}}
+</style></head><body>
+<h1>Bulbi Gizlilik Politikası</h1>
+<p class="muted">Son güncelleme: {{.Updated}}</p>
+
+<p>Bulbi, günlük bulmaca oyunudur. Hesap açma veya giriş gerektirmez. Bu politika,
+Bulbi'nin hangi verileri neden işlediğini açıklar.</p>
+
+<h2>Topladığımız veriler</h2>
+<ul>
+ <li><b>Cihaz kimliği:</b> Uygulamada rastgele üretilen, kişisel kimlik içermeyen
+  bir tanımlayıcı. Liderlik, arkadaş ligleri ve satın alma doğrulaması için kullanılır.</li>
+ <li><b>Görünen ad:</b> Senin belirlediğin takma ad. Liderlik tablolarında ve
+  liglerde görünür. İstediğin zaman değiştirebilirsin.</li>
+ <li><b>Bildirim jetonu:</b> Bildirimleri açtıysan, bildirim göndermek için
+  cihazının push jetonu (Firebase Cloud Messaging).</li>
+ <li><b>Oyun skorları:</b> Liderlik tabloları için günlük skorların.</li>
+ <li><b>Satın alma kayıtları:</b> Coin satın aldığında, satın almanın
+  doğrulanması ve tekrar işlenmemesi için işlem kimliği.</li>
+</ul>
+
+<h2>Toplamadıklarımız</h2>
+<p>Ad-soyad, e-posta, telefon, konum, rehber veya benzeri kişisel bilgileri
+toplamayız. Giriş/hesap sistemi yoktur.</p>
+
+<h2>Cihazında saklananlar</h2>
+<p>Oyun ilerlemen, coin bakiyen, ayarların ve istatistiklerin cihazında yerel
+olarak saklanır; bu veriler sunucularımıza gönderilmez.</p>
+
+<h2>Üçüncü taraf hizmetler</h2>
+<ul>
+ <li><b>Google Firebase (Cloud Messaging):</b> Bildirimler için.</li>
+ <li><b>Apple App Store / Google Play:</b> Uygulama içi satın almalar için.</li>
+</ul>
+<p>Bu hizmetlerin kendi gizlilik politikaları geçerlidir.</p>
+
+<h2>Çocukların gizliliği</h2>
+<p>Bulbi genel kitleye uygundur. Bilerek çocuklardan kişisel veri toplamayız.</p>
+
+<h2>Veri saklama ve silme</h2>
+<p>Bildirimleri kapattığında push jetonun kayıtlarımızdan silinir. Verilerinin
+silinmesini istersen aşağıdaki adresten bize ulaşabilirsin.</p>
+
+<h2>Değişiklikler</h2>
+<p>Bu politika zaman zaman güncellenebilir; geçerli sürümün tarihi yukarıdadır.</p>
+
+<h2>İletişim</h2>
+<p>Sorularını <a href="mailto:{{.Contact}}">{{.Contact}}</a> adresine iletebilirsin.</p>
+</body></html>`))
+
+// clampName adi temizler: bos ise "Anonim", en fazla 24 karakter, kufur/hakaret
+// iceriyorsa "Oyuncu".
 func clampName(s string) string {
 	n := strings.TrimSpace(s)
 	if n == "" {
-		n = "Anonim"
+		return "Anonim"
 	}
 	if len(n) > 24 {
 		n = n[:24]
+	}
+	if moderation.IsProfane(n) {
+		return "Oyuncu"
 	}
 	return n
 }
@@ -277,11 +353,11 @@ func (s *Server) postLeague(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leagueName := strings.TrimSpace(req.LeagueName)
-	if leagueName == "" {
-		leagueName = "Arkadaş Ligi"
-	}
 	if len(leagueName) > 30 {
 		leagueName = leagueName[:30]
+	}
+	if leagueName == "" || moderation.IsProfane(leagueName) {
+		leagueName = "Arkadaş Ligi"
 	}
 	lg, err := s.Store.CreateLeague(r.Context(), req.DeviceID, clampName(req.Name), leagueName)
 	if err != nil {
@@ -688,6 +764,7 @@ type adminData struct {
 	QuestionsTotal int
 	WordPage       int
 	WordPages      int
+	WordQuery      string
 	QuestionPage   int
 	QuestionPages  int
 	Connections      []store.ConnectionRow
@@ -713,9 +790,10 @@ func pageCount(total, size int) int {
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	wp := pageParam(r, "wp")
 	qp := pageParam(r, "qp")
-	wordsTotal, _ := s.Store.CountWords(r.Context())
+	wq := strings.TrimSpace(r.URL.Query().Get("wq"))
+	wordsTotal, _ := s.Store.CountWords(r.Context(), wq)
 	qTotal, _ := s.Store.CountQuestions(r.Context())
-	words, err := s.Store.ListWordsPaged(r.Context(), adminPageSize, (wp-1)*adminPageSize)
+	words, err := s.Store.ListWordsPaged(r.Context(), wq, adminPageSize, (wp-1)*adminPageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -737,6 +815,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		QuestionsTotal:   qTotal,
 		WordPage:         wp,
 		WordPages:        pageCount(wordsTotal, adminPageSize),
+		WordQuery:        wq,
 		QuestionPage:     qp,
 		QuestionPages:    pageCount(qTotal, adminPageSize),
 		Connections:      conns,
@@ -901,8 +980,14 @@ func (s *Server) adminNotify(w http.ResponseWriter, r *http.Request) {
 			log.Printf("notify: token listesi: %v", err)
 			return
 		}
-		sent := s.Push.SendToAll(context.Background(), tokens, title, body, image)
-		log.Printf("admin bildirim: %d/%d gonderildi (gorsel: %t)", sent, len(tokens), image != "")
+		sent, dead := s.Push.SendToAll(context.Background(), tokens, title, body, image)
+		log.Printf("admin bildirim: %d/%d gonderildi (gorsel: %t, %d olu token)",
+			sent, len(tokens), image != "", len(dead))
+		if len(dead) > 0 {
+			if err := s.Store.DeleteTokens(context.Background(), dead); err != nil {
+				log.Printf("admin bildirim: olu token temizligi: %v", err)
+			}
+		}
 	}()
 	redirectMsg(w, r, "Bildirim gonderiliyor…")
 }
@@ -1003,13 +1088,23 @@ func normDiff(s string) string {
 }
 
 func (s *Server) adminAddWord(w http.ResponseWriter, r *http.Request) {
-	if text := strings.TrimSpace(r.FormValue("text")); text != "" {
-		if err := s.Store.AddWord(r.Context(), text); err != nil {
-			log.Printf("kelime ekleme: %v", err)
-		}
+	text := strings.TrimSpace(r.FormValue("text"))
+	if text == "" {
+		redirectMsg(w, r, "Boş kelime")
+		return
+	}
+	added, err := s.Store.AddWord(r.Context(), text)
+	if err != nil {
+		log.Printf("kelime ekleme: %v", err)
+		redirectMsg(w, r, "Kelime eklenemedi")
+		return
 	}
 	s.Cache.Del(r.Context(), cacheKeyBundle)
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	if added {
+		redirectMsg(w, r, store.UpperTR(text)+" eklendi ✓")
+	} else {
+		redirectMsg(w, r, store.UpperTR(text)+" zaten var ⚠️")
+	}
 }
 
 func (s *Server) adminDeleteWord(w http.ResponseWriter, r *http.Request) {
@@ -1150,14 +1245,19 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
 <div class="lists">
 <div class="card">
  <h2>Kelimeler ({{.WordsTotal}})</h2>
+ <form method="get" action="/admin" style="margin:6px 0">
+  <input name="wq" value="{{.WordQuery}}" placeholder="Kelime ara…">
+  <button type="submit">Ara</button>
+  {{if .WordQuery}}<a href="/admin">temizle</a>{{end}}
+ </form>
  <table><tr><th>Kelime</th><th>Harf</th><th></th></tr>
  {{range .Words}}<tr><td>{{.Text}}</td><td>{{.Length}}</td>
   <td><form method="post" action="/admin/words/delete" onsubmit="return confirm('Silinsin mi?')"><input type="hidden" name="id" value="{{.ID}}"><button class="del" type="submit">Sil</button></form></td></tr>{{end}}
  </table>
  <div class="pager">
-  {{if gt .WordPage 1}}<a href="/admin?wp={{add .WordPage -1}}&qp={{.QuestionPage}}">‹ Önceki</a>{{end}}
+  {{if gt .WordPage 1}}<a href="/admin?wp={{add .WordPage -1}}&qp={{.QuestionPage}}&wq={{.WordQuery}}">‹ Önceki</a>{{end}}
   <span>Sayfa {{.WordPage}} / {{.WordPages}}</span>
-  {{if lt .WordPage .WordPages}}<a href="/admin?wp={{add .WordPage 1}}&qp={{.QuestionPage}}">Sonraki ›</a>{{end}}
+  {{if lt .WordPage .WordPages}}<a href="/admin?wp={{add .WordPage 1}}&qp={{.QuestionPage}}&wq={{.WordQuery}}">Sonraki ›</a>{{end}}
  </div>
 </div>
 
@@ -1172,9 +1272,9 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
  </tr>{{end}}
  </table>
  <div class="pager">
-  {{if gt .QuestionPage 1}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage -1}}">‹ Önceki</a>{{end}}
+  {{if gt .QuestionPage 1}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage -1}}&wq={{.WordQuery}}">‹ Önceki</a>{{end}}
   <span>Sayfa {{.QuestionPage}} / {{.QuestionPages}}</span>
-  {{if lt .QuestionPage .QuestionPages}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage 1}}">Sonraki ›</a>{{end}}
+  {{if lt .QuestionPage .QuestionPages}}<a href="/admin?wp={{.WordPage}}&qp={{add .QuestionPage 1}}&wq={{.WordQuery}}">Sonraki ›</a>{{end}}
  </div>
 </div>
 </div>
