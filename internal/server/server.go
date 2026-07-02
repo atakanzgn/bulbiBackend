@@ -440,6 +440,9 @@ var productCoins = map[string]int{
 	"coins_1200": 1400, // ~%17 bonus
 }
 
+// adFreeProduct reklamsiz surum (non-consumable) urun kimligi.
+const adFreeProduct = "ad_free"
+
 func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DeviceID  string `json:"deviceId"`
@@ -455,8 +458,8 @@ func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "deviceId gerekli")
 		return
 	}
-	coins, ok := productCoins[req.ProductID]
-	if !ok {
+	coins, isCoins := productCoins[req.ProductID]
+	if !isCoins && req.ProductID != adFreeProduct {
 		writeError(w, http.StatusBadRequest, "gecersiz urun")
 		return
 	}
@@ -501,15 +504,19 @@ func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "kayit hatasi")
 		return
 	}
-	granted := coins
-	if !fresh {
-		granted = 0
+	resp := map[string]any{"alreadyProcessed": !fresh}
+	if isCoins {
+		granted := coins
+		if !fresh {
+			granted = 0
+		}
+		resp["granted"] = granted
+		resp["coins"] = coins
+	} else {
+		// Reklamsiz (non-consumable): restore icin her zaman entitlement don.
+		resp["entitlement"] = "ad_free"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"granted":          granted,
-		"coins":            coins,
-		"alreadyProcessed": !fresh,
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type deviceRequest struct {
