@@ -92,6 +92,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/import/questions", s.adminGuard(s.adminImportQuestions))
 	mux.HandleFunc("POST /admin/notify", s.adminGuard(s.adminNotify))
 	mux.HandleFunc("POST /admin/announcement", s.adminGuard(s.adminAnnouncement))
+	mux.HandleFunc("POST /admin/announcement/delete",
+		s.adminGuard(s.adminAnnouncementDelete))
+	mux.HandleFunc("POST /admin/announcement/toggle",
+		s.adminGuard(s.adminAnnouncementToggle))
 	mux.HandleFunc("POST /admin/connections", s.adminGuard(s.adminAddConnection))
 	mux.HandleFunc("POST /admin/connections/delete",
 		s.adminGuard(s.adminDeleteConnection))
@@ -521,29 +525,27 @@ func (s *Server) postIAPVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// getAnnouncement ana ekran duyurusunu doner. Aktif duyuru yoksa {"active":false}.
-// "id" (updated_at) istemcide "kapattim" takibi icindir: duyuru guncellenince
-// id degisir ve kart yeniden gorunur.
+// getAnnouncement aktif duyurulari (yeniden eskiye) doner.
+// Istemci "id" ile kullanicinin kapattigi duyurulari gizler.
 func (s *Server) getAnnouncement(w http.ResponseWriter, r *http.Request) {
-	a, err := s.Store.GetAnnouncement(r.Context())
+	list, err := s.Store.ListAnnouncements(r.Context(), true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "duyuru okunamadi")
 		return
 	}
-	if !a.Active || a.Title == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"active": false})
-		return
+	items := make([]map[string]any, 0, len(list))
+	for _, a := range list {
+		items = append(items, map[string]any{
+			"id":    a.ID,
+			"title": a.Title,
+			"body":  a.Body,
+			"code":  a.Code,
+		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"active": true,
-		"id":     a.UpdatedAt,
-		"title":  a.Title,
-		"body":   a.Body,
-		"code":   a.Code,
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"announcements": items})
 }
 
-// adminAnnouncement duyuruyu kaydeder/pasiflestirir.
+// adminAnnouncement yeni duyuru ekler.
 func (s *Server) adminAnnouncement(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
@@ -555,15 +557,39 @@ func (s *Server) adminAnnouncement(w http.ResponseWriter, r *http.Request) {
 		Code:   strings.ToUpper(strings.TrimSpace(r.FormValue("code"))),
 		Active: r.FormValue("active") == "on",
 	}
-	if err := s.Store.SetAnnouncement(r.Context(), a); err != nil {
+	if a.Title == "" {
+		http.Redirect(w, r, "/admin?msg="+url.QueryEscape("Başlık gerekli"),
+			http.StatusSeeOther)
+		return
+	}
+	if err := s.Store.AddAnnouncement(r.Context(), a); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	msg := "Duyuru kaydedildi ✓"
-	if !a.Active {
-		msg = "Duyuru pasif ⏸"
+	http.Redirect(w, r,
+		"/admin?msg="+url.QueryEscape("Duyuru eklendi ✓"), http.StatusSeeOther)
+}
+
+// adminAnnouncementDelete duyuruyu siler.
+func (s *Server) adminAnnouncementDelete(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err := s.Store.DeleteAnnouncement(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	http.Redirect(w, r, "/admin?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	http.Redirect(w, r,
+		"/admin?msg="+url.QueryEscape("Duyuru silindi 🗑"), http.StatusSeeOther)
+}
+
+// adminAnnouncementToggle aktif/pasif degistirir.
+func (s *Server) adminAnnouncementToggle(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err := s.Store.ToggleAnnouncement(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r,
+		"/admin?msg="+url.QueryEscape("Duyuru güncellendi ✓"), http.StatusSeeOther)
 }
 
 type deviceRequest struct {
@@ -825,7 +851,7 @@ type adminData struct {
 	ConnectionsTotal int
 	PushEnabled    bool
 	Notice         string
-	Ann            store.Announcement
+	Anns           []store.Announcement
 }
 
 func pageParam(r *http.Request, key string) int {
@@ -861,7 +887,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	}
 	version, _ := s.Store.ContentVersion(r.Context())
 	conns, _ := s.Store.ListConnections(r.Context())
-	ann, _ := s.Store.GetAnnouncement(r.Context())
+	anns, _ := s.Store.ListAnnouncements(r.Context(), false)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := adminTmpl.Execute(w, adminData{
 		Version:          version,
@@ -878,7 +904,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		ConnectionsTotal: len(conns),
 		PushEnabled:      s.Push != nil,
 		Notice:           r.URL.Query().Get("msg"),
-		Ann:              ann,
+		Anns:             anns,
 	}); err != nil {
 		log.Printf("admin template: %v", err)
 	}
@@ -1229,17 +1255,41 @@ var adminTmpl = template.Must(template.New("admin").Funcs(template.FuncMap{
 {{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
 
 <div class="card">
- <h2>🎁 Ana ekran duyurusu / kampanya kodu</h2>
+ <h2>🎁 Ana ekran duyuruları / kampanya kodları</h2>
  <form method="post" action="/admin/announcement">
-  <input class="full" name="title" placeholder="Başlık (ör. Yaz Kampanyası!)" value="{{.Ann.Title}}" required>
-  <input class="full" name="body" placeholder="Açıklama (ör. 100 Coin şimdi 5 TL)" value="{{.Ann.Body}}">
-  <input class="full" name="code" placeholder="Offer kodu (ör. PASAM) — boş bırakılabilir" value="{{.Ann.Code}}">
-  <label><input type="checkbox" name="active" {{if .Ann.Active}}checked{{end}}> Aktif (uygulamada göster)</label>
-  <button type="submit">Kaydet</button>
-  <div class="muted">Aktifken ana ekranda kart olarak görünür; kod varsa "Kodu kullan"
-  düğmesi App Store kod bozdurma sayfasını açar. Kaydedince kartı kapatmış
-  kullanıcılarda da yeniden görünür.</div>
+  <input class="full" name="title" placeholder="Başlık (ör. Yaz Kampanyası!)" required>
+  <input class="full" name="body" placeholder="Açıklama (ör. 100 Coin şimdi 5 TL)">
+  <input class="full" name="code" placeholder="Offer kodu (ör. PASAM) — boş bırakılabilir">
+  <label><input type="checkbox" name="active" checked> Aktif (uygulamada göster)</label>
+  <button type="submit">Ekle</button>
+  <div class="muted">Aktif duyuruların hepsi ana ekranda kart olarak görünür (yeniden
+  eskiye). Kod varsa "Kodu kullan" düğmesi App Store kod bozdurma sayfasını açar.</div>
  </form>
+ {{if .Anns}}
+ <table>
+  <tr><th>Başlık</th><th>Kod</th><th>Durum</th><th></th><th></th></tr>
+  {{range .Anns}}
+  <tr>
+   <td>{{.Title}}{{if .Body}} <span class="muted">— {{.Body}}</span>{{end}}</td>
+   <td>{{if .Code}}<code>{{.Code}}</code>{{else}}<span class="muted">—</span>{{end}}</td>
+   <td>{{if .Active}}✅ aktif{{else}}⏸ pasif{{end}}</td>
+   <td>
+    <form method="post" action="/admin/announcement/toggle" style="display:inline">
+     <input type="hidden" name="id" value="{{.ID}}">
+     <button type="submit">{{if .Active}}Pasifleştir{{else}}Aktifleştir{{end}}</button>
+    </form>
+   </td>
+   <td>
+    <form method="post" action="/admin/announcement/delete" style="display:inline"
+          onsubmit="return confirm('Duyuru silinsin mi?')">
+     <input type="hidden" name="id" value="{{.ID}}">
+     <button type="submit">Sil</button>
+    </form>
+   </td>
+  </tr>
+  {{end}}
+ </table>
+ {{end}}
 </div>
 
 {{if .PushEnabled}}

@@ -101,13 +101,13 @@ var migrations = []string{
 		coins          INTEGER NOT NULL,
 		created_at     BIGINT  NOT NULL
 	)`,
-	`CREATE TABLE IF NOT EXISTS announcement (
-		id         INTEGER PRIMARY KEY,
-		title      TEXT    NOT NULL DEFAULT '',
+	`CREATE TABLE IF NOT EXISTS announcements (
+		id         BIGSERIAL PRIMARY KEY,
+		title      TEXT    NOT NULL,
 		body       TEXT    NOT NULL DEFAULT '',
 		code       TEXT    NOT NULL DEFAULT '',
-		active     BOOLEAN NOT NULL DEFAULT FALSE,
-		updated_at BIGINT  NOT NULL DEFAULT 0
+		active     BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at BIGINT  NOT NULL
 	)`,
 }
 
@@ -375,41 +375,60 @@ func (s *Store) RecordPurchase(ctx context.Context, txnID, deviceID, productID, 
 	return ct.RowsAffected() > 0, nil
 }
 
-// Announcement ana ekranda gosterilen kampanya/duyuru (tek kayit, id=1).
+// Announcement ana ekranda gosterilen kampanya/duyuru satiri.
 type Announcement struct {
+	ID        int64
 	Title     string
 	Body      string
 	Code      string
 	Active    bool
-	UpdatedAt int64
+	CreatedAt int64
 }
 
-// GetAnnouncement mevcut duyuruyu doner; hic kaydedilmemisse bos/pasif doner.
-func (s *Store) GetAnnouncement(ctx context.Context) (Announcement, error) {
-	var a Announcement
-	err := s.pool.QueryRow(ctx,
-		`SELECT title, body, code, active, updated_at FROM announcement WHERE id = 1`).
-		Scan(&a.Title, &a.Body, &a.Code, &a.Active, &a.UpdatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Announcement{}, nil
-		}
-		return Announcement{}, err
-	}
-	return a, nil
-}
-
-// SetAnnouncement duyuruyu gunceller (upsert, id=1). updated_at, istemcinin
-// "kapattim" isaretini sifirlamak icin surum kimligi olarak da kullanilir.
-func (s *Store) SetAnnouncement(ctx context.Context, a Announcement) error {
+// AddAnnouncement yeni duyuru ekler (ayni anda birden fazla duyuru olabilir).
+func (s *Store) AddAnnouncement(ctx context.Context, a Announcement) error {
 	_, err := s.pool.Exec(ctx, `
-INSERT INTO announcement (id, title, body, code, active, updated_at)
-VALUES (1, $1, $2, $3, $4, $5)
-ON CONFLICT (id) DO UPDATE SET
-  title = EXCLUDED.title, body = EXCLUDED.body, code = EXCLUDED.code,
-  active = EXCLUDED.active, updated_at = EXCLUDED.updated_at`,
+INSERT INTO announcements (title, body, code, active, created_at)
+VALUES ($1, $2, $3, $4, $5)`,
 		a.Title, a.Body, a.Code, a.Active, time.Now().Unix())
 	return err
+}
+
+// DeleteAnnouncement duyuruyu tamamen siler.
+func (s *Store) DeleteAnnouncement(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM announcements WHERE id = $1`, id)
+	return err
+}
+
+// ToggleAnnouncement aktif/pasif durumunu tersine cevirir.
+func (s *Store) ToggleAnnouncement(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE announcements SET active = NOT active WHERE id = $1`, id)
+	return err
+}
+
+// ListAnnouncements tum duyurulari (admin icin) yeniden eskiye dogru doner.
+// activeOnly true ise yalnizca aktif olanlar (uygulama API'si) doner.
+func (s *Store) ListAnnouncements(ctx context.Context, activeOnly bool) ([]Announcement, error) {
+	q := `SELECT id, title, body, code, active, created_at FROM announcements`
+	if activeOnly {
+		q += ` WHERE active`
+	}
+	q += ` ORDER BY id DESC`
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Announcement
+	for rows.Next() {
+		var a Announcement
+		if err := rows.Scan(&a.ID, &a.Title, &a.Body, &a.Code, &a.Active, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // SaveDevice push icin cihaz token'ini kaydeder/gunceller.
