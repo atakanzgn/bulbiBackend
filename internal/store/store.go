@@ -101,6 +101,14 @@ var migrations = []string{
 		coins          INTEGER NOT NULL,
 		created_at     BIGINT  NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS announcement (
+		id         INTEGER PRIMARY KEY,
+		title      TEXT    NOT NULL DEFAULT '',
+		body       TEXT    NOT NULL DEFAULT '',
+		code       TEXT    NOT NULL DEFAULT '',
+		active     BOOLEAN NOT NULL DEFAULT FALSE,
+		updated_at BIGINT  NOT NULL DEFAULT 0
+	)`,
 }
 
 // Open havuzu acar, baglantiyi dogrular ve semayi olusturur.
@@ -365,6 +373,43 @@ func (s *Store) RecordPurchase(ctx context.Context, txnID, deviceID, productID, 
 		return false, err
 	}
 	return ct.RowsAffected() > 0, nil
+}
+
+// Announcement ana ekranda gosterilen kampanya/duyuru (tek kayit, id=1).
+type Announcement struct {
+	Title     string
+	Body      string
+	Code      string
+	Active    bool
+	UpdatedAt int64
+}
+
+// GetAnnouncement mevcut duyuruyu doner; hic kaydedilmemisse bos/pasif doner.
+func (s *Store) GetAnnouncement(ctx context.Context) (Announcement, error) {
+	var a Announcement
+	err := s.pool.QueryRow(ctx,
+		`SELECT title, body, code, active, updated_at FROM announcement WHERE id = 1`).
+		Scan(&a.Title, &a.Body, &a.Code, &a.Active, &a.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Announcement{}, nil
+		}
+		return Announcement{}, err
+	}
+	return a, nil
+}
+
+// SetAnnouncement duyuruyu gunceller (upsert, id=1). updated_at, istemcinin
+// "kapattim" isaretini sifirlamak icin surum kimligi olarak da kullanilir.
+func (s *Store) SetAnnouncement(ctx context.Context, a Announcement) error {
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO announcement (id, title, body, code, active, updated_at)
+VALUES (1, $1, $2, $3, $4, $5)
+ON CONFLICT (id) DO UPDATE SET
+  title = EXCLUDED.title, body = EXCLUDED.body, code = EXCLUDED.code,
+  active = EXCLUDED.active, updated_at = EXCLUDED.updated_at`,
+		a.Title, a.Body, a.Code, a.Active, time.Now().Unix())
+	return err
 }
 
 // SaveDevice push icin cihaz token'ini kaydeder/gunceller.
